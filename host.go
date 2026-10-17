@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
-	"time"
 )
 
 // GoFunc is the one native signature for host functions. Everything else adapts to it.
@@ -47,15 +46,8 @@ func (c *Call) Context() context.Context {
 	e.steps.Store(ex.steps + int64(max(ex.st.ticks, 0)))
 	e.alloc.Store(ex.allocLeft)
 	e.depth.Store(int64(ex.maxHostDepth - ex.depth))
-	e.deadline.Store(deadlineNanos(ex.deadline))
+	e.deadline.Store(ex.deadline)
 	return e
-}
-
-func deadlineNanos(t time.Time) int64 {
-	if t.IsZero() {
-		return 0
-	}
-	return t.UnixNano()
 }
 
 // entryCtx is the context host functions see: the entry's own, carrying what was left of its
@@ -66,18 +58,10 @@ type entryCtx struct {
 	context.Context
 	steps, alloc, depth  atomic.Int64
 	usedSteps, usedAlloc atomic.Int64
-	deadline             atomic.Int64 // when Limits.Time runs out, in Unix nanoseconds; 0 for never
-}
-
-// Deadline reports the earlier of the entry's context's deadline and when Limits.Time runs
-// out for the entry, so that a host function can bound its own work by it. Done closes with
-// the entry's context only: running out of time ends the entry when it next takes steps.
-func (e *entryCtx) Deadline() (time.Time, bool) {
-	d, ok := e.Context.Deadline()
-	if n := e.deadline.Load(); n != 0 && (!ok || n < d.UnixNano()) {
-		return time.Unix(0, n), true
-	}
-	return d, ok
+	// when Limits.Time runs out for the entry, on monoNow's clock, or 0, for the entries made
+	// with it. Not the context's Deadline: Done does not close then, and a context derived
+	// with a timeout of its own would trust the parent's Done and drop its own timer.
+	deadline atomic.Int64
 }
 
 type budgetKey struct{}
@@ -172,6 +156,9 @@ func (c *Call) Renew() {
 		ex.charge(0) // the stack grew past the budget, and this is the charge that fails
 		return
 	}
+	if ex.maxTime > 0 { // first: the wait may have outlasted the old deadline, which paying must not see
+		ex.deadline = monoAfter(ex.maxTime)
+	}
 	if ex.ectx != nil && ex.payBorrowed() != nil {
 		return // what nested entries used came out of the old budgets, and ran them out
 	}
@@ -180,13 +167,10 @@ func (c *Call) Renew() {
 	q := min(tickQuantum, ex.maxSteps)
 	ex.steps, ex.st.ticks = ex.maxSteps-q, int(q)
 	ex.allocLeft = ex.maxAlloc
-	if ex.maxTime > 0 {
-		ex.deadline = time.Now().Add(ex.maxTime)
-	}
 	if e := ex.ectx; e != nil { // a context the function took before carries the budgets afresh
 		e.steps.Store(ex.maxSteps)
 		e.alloc.Store(ex.maxAlloc)
-		e.deadline.Store(deadlineNanos(ex.deadline))
+		e.deadline.Store(ex.deadline)
 	}
 	c.clearDead()
 }

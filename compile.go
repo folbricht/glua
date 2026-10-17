@@ -341,8 +341,8 @@ func (fs *fstate) addK(v Value) int {
 	if v.isString() {
 		h := unique.Make(v.str())
 		fs.p.handles = append(fs.p.handles, h)
-		register(v.str(), h)  // so that keys Go code sets find this pointer too
-		v = String(h.Value()) // canonical: field names and constants share pointers
+		register(v.str(), h, maxDynamic) // so that keys Go code sets find this pointer too
+		v = String(h.Value())            // canonical: field names and constants share pointers
 	}
 	fs.p.k = append(fs.p.k, v)
 	fs.p.khash = append(fs.p.khash, hashValue(v))

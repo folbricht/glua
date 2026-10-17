@@ -47,7 +47,7 @@ switches a limit off.
 | `CallDepth` | 10,000 | Lua frames | `stack overflow`, which `pcall` can catch |
 | `HostDepth` | 100 | Nesting of Go and Lua: host functions that call back into Lua, library callbacks such as sort's comparator, scripts called from host functions | `ErrHostDepth`, terminal |
 | `InitSteps`, `InitAllocBytes` | `Steps`, `AllocBytes` | The same, for the top level in `Load` and `NewVM` | As above |
-| `Time` | none | Wall-clock time since the entry started or last renewed, checked every 1,024 steps and when a host function charges for its work. Nested entries made with a host function's `Context` end with it, and that context reports it as its deadline; a host function that runs long is not interrupted | `ErrTime`, terminal |
+| `Time` | none | Wall-clock time since the entry started or last renewed, checked every 1,024 steps and when a host function charges for its work. Nested entries made with a host function's `Context` end with it; a host function that runs long is not interrupted, nor is its context cancelled | `ErrTime`, terminal |
 | context | none | Checked when the entry starts, again every 1,024 steps, and when a host function returns an error | The context's cause, terminal |
 
 `Script.WithLimits` gives the same code and state other limits, for example per tenant. The

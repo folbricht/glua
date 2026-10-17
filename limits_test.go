@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -546,17 +547,14 @@ func TestTimeLimit(t *testing.T) {
 }
 
 // Limits.Time reaches what the entry does on its behalf: a nested entry made with the host
-// function's Context ends with the entry's time, the Context reports it as a deadline, and a
-// host function that charges for its work as it goes is told when the time runs out.
+// function's Context ends with the entry's time, and a host function that charges for its
+// work as it goes is told when the time runs out.
 func TestTimeLimitNested(t *testing.T) {
 	var s *Script
-	var deadline time.Time
 	rt := MustNew(Limits{Steps: NoLimit, AllocBytes: NoLimit, Time: 100 * time.Millisecond},
 		Global("nested", GoFunc(func(c *Call) error {
 			time.Sleep(60 * time.Millisecond)
-			ctx := c.Context()
-			deadline, _ = ctx.Deadline()
-			_, err := s.Call(ctx, s.Globals().Get(String("spin")))
+			_, err := s.Call(c.Context(), s.Globals().Get(String("spin")))
 			return err
 		})),
 		Global("chunks", GoFunc(func(c *Call) error {
@@ -578,11 +576,69 @@ func TestTimeLimitNested(t *testing.T) {
 	if took := time.Since(start); !errors.Is(err, ErrTime) || took > 150*time.Millisecond {
 		t.Errorf("a nested entry spinning: %v after %v, want ErrTime at 100 ms", err, took)
 	}
-	if d := deadline.Sub(start); d < 90*time.Millisecond || d > 110*time.Millisecond {
-		t.Errorf("Context's deadline is %v after the start, want 100 ms", d)
-	}
 	start = time.Now()
 	if _, err := s.Call(ctx, s.Globals().Get(String("work"))); !errors.Is(err, ErrTime) || time.Since(start) > 300*time.Millisecond {
 		t.Errorf("a host function charging for its work in chunks: %v after %v, want ErrTime at 100 ms", err, time.Since(start))
+	}
+}
+
+// The time limit's edges: a Time of centuries is no limit rather than a deadline wrapped into
+// the past; Renew after a wait longer than Time renews, even with nested work to pay for; a
+// nested entry made after the time ran out runs nothing; and a host function's own timeout,
+// derived from its Context, still fires.
+func TestTimeLimitEdges(t *testing.T) {
+	var s *Script
+	touched := false
+	rt := MustNew(Limits{Steps: NoLimit, AllocBytes: NoLimit, Time: 50 * time.Millisecond},
+		Global("touch", GoFunc(func(c *Call) error { touched = true; return nil })),
+		Global("waitRenew", GoFunc(func(c *Call) error {
+			if _, err := s.Call(c.Context(), s.Globals().Get(String("busy"))); err != nil {
+				return err
+			}
+			time.Sleep(80 * time.Millisecond)
+			c.Renew()
+			return nil
+		})),
+		Global("late", GoFunc(func(c *Call) error {
+			time.Sleep(80 * time.Millisecond)
+			_, err := s.Call(c.Context(), s.Globals().Get(String("side")))
+			return err
+		})),
+		Global("timeout", GoFunc(func(c *Call) error {
+			// later than the entry's time: a parent deadline reported earlier would make
+			// WithTimeout trust the parent's Done, which never closes for Time
+			ctx, cancel := context.WithTimeout(c.Context(), 100*time.Millisecond)
+			defer cancel()
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(2 * time.Second):
+				return errors.New("the host's own timeout did not fire")
+			}
+		})))
+	s = mustLoad(t, rt, `
+		function busy() for i = 1, 5000 do end end
+		function renewing() waitRenew() waitRenew() for i = 1, 5000 do end end
+		function side() touch() end
+		function tooLate() return late() end
+		function own() return timeout() end`)
+	ctx := context.Background()
+	if _, err := s.Call(ctx, s.Globals().Get(String("renewing"))); err != nil {
+		t.Errorf("renewing after waits longer than Time: %v", err)
+	}
+	if _, err := s.Call(ctx, s.Globals().Get(String("tooLate"))); !errors.Is(err, ErrTime) || touched {
+		t.Errorf("a nested entry made after the time ran out: %v, ran: %v", err, touched)
+	}
+	if _, err := s.Call(ctx, s.Globals().Get(String("own"))); err != nil {
+		t.Error(err)
+	}
+	var long *Script
+	long = mustLoad(t, MustNew(Limits{Time: math.MaxInt64},
+		Global("nest", GoFunc(func(c *Call) error {
+			_, err := long.Call(c.Context(), long.Globals().Get(String("work")))
+			return err
+		}))), "function work() for i = 1, 5000 do end return 1 end function f() return nest() end")
+	if _, err := long.Call(ctx, long.Globals().Get(String("f"))); err != nil {
+		t.Errorf("Time of math.MaxInt64, nested: %v", err)
 	}
 }

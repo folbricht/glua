@@ -16,7 +16,7 @@ import (
 // freezer collects the objects reachable from the values given to add.
 type freezer struct {
 	plans  *[]*typeInfo // the Runtime's view of bound types; nil for the process-wide one
-	intern bool         // give string keys the canonical pointers constants have
+	intern int64        // give string keys the canonical pointers constants have, registering up to this many names; 0: not
 	seen   map[unsafe.Pointer]bool
 	types  map[uint64]uint8 // the bound types checked: 1 through a live view, 2 a read-only one
 	work   []freezeItem
@@ -170,8 +170,8 @@ func (f *freezer) checkField(fl *field, readonly bool, path string) error {
 // freeze makes what walk collected read-only.
 func (f *freezer) freeze() {
 	for _, t := range f.tables {
-		if f.intern {
-			t.internKeys()
+		if f.intern > 0 {
+			t.internKeys(f.intern)
 		}
 		t.freeze()
 	}
@@ -185,7 +185,7 @@ func (f *freezer) freeze() {
 // scripts loaded after it, whose constants must find its keys inline.
 func freezeValue(v Value, path string) error {
 	f := newFreezer()
-	f.intern = true
+	f.intern = maxDynamic
 	f.add(v, path)
 	if err := f.walk(); err != nil {
 		return err
@@ -279,12 +279,15 @@ var (
 
 const (
 	maxInterned   = 1 << 16 // names in the registry
+	maxDynamic    = 1 << 15 // of them, names that scripts and Table.Freeze bring, which may never end
 	maxInternedSz = 64      // longest name interned, in bytes
 )
 
 // internKey returns k with the canonical pointer, if k is a short name and the registry
-// has room; otherwise k itself.
-func internKey(k Value) Value {
+// has room for limit names; otherwise k itself. Names frozen with a Runtime, which the host
+// chooses, may fill the registry; those that compiled scripts and Table.Freeze bring, which
+// may never end, fill at most maxDynamic of it, so that they cannot crowd out the others.
+func internKey(k Value, limit int64) Value {
 	if !k.isString() || k.n&lenMask > maxInternedSz {
 		return k
 	}
@@ -292,17 +295,18 @@ func internKey(k Value) Value {
 	if h, ok := interned.Load(s); ok {
 		return String(h.(unique.Handle[string]).Value())
 	}
-	if !isName(s) || internedCount.Load() >= maxInterned {
+	if !isName(s) || internedCount.Load() >= limit {
 		return k
 	}
 	h := unique.Make(s)
-	register(s, h)
+	register(s, h, limit)
 	return String(h.Value())
 }
 
-// register keeps h, the canonical s, in the registry if s is a short name and there is room.
-func register(s string, h unique.Handle[string]) {
-	if len(s) > maxInternedSz || !isName(s) || internedCount.Load() >= maxInterned {
+// register keeps h, the canonical s, in the registry if s is a short name and the registry
+// holds fewer than limit names.
+func register(s string, h unique.Handle[string], limit int64) {
+	if len(s) > maxInternedSz || !isName(s) || internedCount.Load() >= limit {
 		return
 	}
 	if _, loaded := interned.LoadOrStore(s, h); !loaded {
@@ -324,9 +328,9 @@ func canonKey(k Value) Value {
 	return k
 }
 
-// internKeys gives t's string keys their canonical pointers.
-func (t *Table) internKeys() {
+// internKeys gives t's string keys their canonical pointers, as internKey does.
+func (t *Table) internKeys(limit int64) {
 	for i := range t.nodes {
-		t.nodes[i].k = internKey(t.nodes[i].k)
+		t.nodes[i].k = internKey(t.nodes[i].k, limit)
 	}
 }

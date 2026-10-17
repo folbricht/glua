@@ -45,7 +45,7 @@ var typeNames = func() (t [KindThread + 1]Value) {
 		if Kind(k) == KindInt || Kind(k) == KindFloat {
 			name = "number"
 		}
-		t[k] = internKey(String(name))
+		t[k] = internKey(String(name), maxInterned)
 	}
 	return t
 }()

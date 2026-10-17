@@ -2,6 +2,7 @@ package glua
 
 import (
 	"context"
+	"math"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,7 @@ const (
 	initStack     = 512      // 8 KB of registers
 	maxPoolStack  = 4096     // an executor whose stack grew beyond 64 KB is not pooled
 	maxPoolFrames = 1024     // nor one whose frames grew beyond 8 KB
+	shrinkAfter   = 4        // checks in a row that a grown stack went unused before it shrinks
 	maxStack      = 1 << 20  // fixed cap: register stack slots
 	tickQuantum   = 1024     // steps handed to the loop between refills
 	defaultSteps  = 10000000 // Limits.Steps default
@@ -127,7 +129,8 @@ type executor struct {
 	// what the entry used before its last Renew, which CallStats adds to what it used since
 	renewedSteps, renewedAlloc int64
 	maxTime                    time.Duration // Limits.Time, or 0
-	deadline                   time.Time     // when the entry, or the round since Renew, runs out of time; zero for never
+	quietChecks                int           // shrink's checks in a row that found the stack too large
+	deadline                   int64         // when the entry, or the round since Renew, runs out of time, on monoNow's clock; 0 for never
 	// liveKnown says that collectgarbage measured liveBase bytes live when the entry had
 	// allocated liveAt: its count is that plus what was allocated since
 	liveKnown        bool
@@ -174,21 +177,24 @@ func (ex *executor) call(ctx context.Context, cl *closure, fn, nargs int) (err e
 	if ex.maxHostDepth < 0 {
 		return ErrHostDepth
 	}
+	ex.deadline = 0
+	if ex.maxTime > 0 {
+		ex.deadline = monoAfter(ex.maxTime)
+	}
+	if parent != nil { // a nested entry ends when the entry that made it runs out of time
+		if n := parent.deadline.Load(); n != 0 && (ex.deadline == 0 || n < ex.deadline) {
+			ex.deadline = n
+		}
+	}
+	if ex.deadline != 0 && monoNow() >= ex.deadline {
+		return ErrTime // as a cancelled context: out of time before it starts, it runs nothing
+	}
 	// ex.types stays from entry to entry: plans are only ever added, and plan reloads the
 	// list when it meets a type bound since
 	ex.running, ex.ctx = true, ctx
 	q := min(tickQuantum, ex.maxSteps)
 	ex.steps, ex.st.ticks = ex.maxSteps-q, int(q) // set as the entry starts, and by Renew: a nested run shares them
 	ex.allocLeft = ex.maxAlloc
-	ex.deadline = time.Time{}
-	if ex.maxTime > 0 {
-		ex.deadline = time.Now().Add(ex.maxTime)
-	}
-	if parent != nil { // a nested entry ends when the entry that made it runs out of time
-		if n := parent.deadline.Load(); n != 0 && (ex.deadline.IsZero() || n < ex.deadline.UnixNano()) {
-			ex.deadline = time.Unix(0, n)
-		}
-	}
 	ex.fixed = parent != nil
 	completed := false
 	defer func() {
@@ -401,10 +407,26 @@ func (ex *executor) interrupted() error {
 	if ex.ctx.Err() != nil { // never Done(): it allocates a channel on a fresh context
 		return ex.terminal(ctxError(ex.ctx))
 	}
-	if !ex.deadline.IsZero() && time.Now().After(ex.deadline) {
+	if ex.deadline != 0 && monoNow() >= ex.deadline {
 		return ex.terminal(ErrTime)
 	}
 	return nil
+}
+
+// monoEpoch starts monoNow's clock, which reads the monotonic clock as nanoseconds since,
+// so that a deadline is one integer: no wall-clock jumps, and a compare to check.
+var monoEpoch = time.Now()
+
+func monoNow() int64 { return int64(time.Since(monoEpoch)) }
+
+// monoAfter is the deadline d from now, saturating: a Time of centuries is never, not a
+// deadline wrapped into the past.
+func monoAfter(d time.Duration) int64 {
+	now := monoNow()
+	if int64(d) > math.MaxInt64-now {
+		return math.MaxInt64
+	}
+	return now + int64(d)
 }
 
 // tableSet does t[k] = v for Lua code, charging what the table grows by. A table already

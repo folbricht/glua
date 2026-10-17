@@ -156,16 +156,27 @@ func (c *Call) clearDead() {
 }
 
 // shrink gives back a stack and frames that a deep call grew, as C Lua's luaD_shrinkstack
-// does, once they are past what the pool keeps and four times what was used since the last
-// shrink: used is the most stack slots held since. An entry that goes deep round after round
-// keeps what it grew, rather than paying to grow it again each time. The frames follow the
-// stack: every frame takes at least a slot.
+// does, once they are past what the pool keeps and four times what was used, at shrinkAfter
+// checks in a row: used is the most stack slots held since the last check. An entry or a VM
+// that goes deep now and then keeps what it grew, rather than paying to grow it again; one
+// deep call long past is given back. The frames follow the stack: every frame takes a slot.
 func (ex *executor) shrink(used int) {
 	need := used + stackSlack
-	if len(ex.stack) > maxPoolStack && len(ex.stack) > 4*need {
+	n := max(64, 2*need, 2*(ex.st.nf+1))
+	stack := len(ex.stack) > maxPoolStack && len(ex.stack) > 4*need
+	frames := len(ex.pframes) > maxPoolFrames && len(ex.pframes) > 2*n
+	if !stack && !frames {
+		ex.quietChecks = 0
+		return
+	}
+	if ex.quietChecks++; ex.quietChecks < shrinkAfter {
+		return
+	}
+	ex.quietChecks = 0
+	if stack {
 		ex.moveStack(max(initStack, 2*need))
 	}
-	if n := max(64, 2*need, 2*(ex.st.nf+1)); len(ex.pframes) > maxPoolFrames && len(ex.pframes) > 2*n {
+	if frames {
 		ex.pframes = append(make([]uint64, 0, n), ex.pframes[:n]...)
 		if len(ex.nvar) > n {
 			ex.nvar = append([]int32(nil), ex.nvar[:n]...)

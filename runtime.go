@@ -92,7 +92,7 @@ type Limits struct {
 	// Time is how long an entry may run, checked as it takes steps, and given afresh by
 	// Renew; default none. A nested entry made with a host function's Call.Context ends
 	// with it. A host function's own time counts, but one that runs long is not
-	// interrupted: Call.Context's Deadline tells it when the time runs out.
+	// interrupted, nor is its context cancelled.
 	Time time.Duration
 }
 
@@ -480,7 +480,7 @@ func (rt *Runtime) buildLayer(o *options) error {
 		rt.sources[name] = m
 	}
 	fr := newFreezer()
-	fr.plans, fr.intern = rt.plans(), true
+	fr.plans, fr.intern = rt.plans(), maxInterned
 	fr.add(tableValue(g), "globals")
 	if rt.strMeta != nil {
 		fr.add(tableValue(rt.strMeta), "the string metatable") // its library, even when Without left out the global

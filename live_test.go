@@ -3,6 +3,7 @@ package glua
 import (
 	"context"
 	"testing"
+	"unique"
 )
 
 func liveRuntime(t *testing.T) *Runtime {
@@ -130,9 +131,9 @@ func TestCollectGarbageCount(t *testing.T) {
 	}
 }
 
-// A stack and frames that one deep call grew shrink again once a round, or a call of a VM,
-// no longer uses them; an entry that goes deep every round keeps them, rather than paying
-// to grow them again each time.
+// A stack and frames that one deep call grew shrink again once four checks in a row, at
+// Renew, collectgarbage or the end of a VM call, found them unused; an entry or a VM that goes
+// deep now and then keeps them, rather than paying to grow them again each time.
 func TestDeepStackShrinks(t *testing.T) {
 	var stack, frames []int
 	rt := MustNew(LibSafe, Limits{Steps: NoLimit, AllocBytes: 1 << 21, CallDepth: 50_000},
@@ -144,15 +145,15 @@ func TestDeepStackShrinks(t *testing.T) {
 		})))
 	s := mustLoad(t, rt, `
 		local function deep(n) if n > 0 then return 1 + deep(n - 1) end return 0 end
-		function f() deep(20000) renew() renew() return deep(10) end
+		function f() deep(20000) for i = 1, 5 do renew() end return deep(10) end
 		function again(n) for i = 1, n do deep(20000) collectgarbage() end end
 		function g(n) return deep(n) end`)
 	ctx := context.Background()
 	if _, err := s.Call(ctx, s.Globals().Get(String("f"))); err != nil {
 		t.Fatal(err)
 	}
-	if stack[0] < 20_000 || stack[1] > maxPoolStack || frames[0] < 20_000 || frames[1] > maxPoolFrames {
-		t.Errorf("stack %v slots and frames %v, after the round that went deep and after a quiet one", stack, frames)
+	if stack[3] < 20_000 || stack[4] > maxPoolStack || frames[3] < 20_000 || frames[4] > maxPoolFrames {
+		t.Errorf("stack %v slots and frames %v at five renewals after one deep call", stack, frames)
 	}
 	// 50 rounds of growing 20,000 slots again would charge 16 MB to a 2 MB budget
 	if _, err := s.Call(ctx, s.Globals().Get(String("again")), Int(50)); err != nil {
@@ -160,13 +161,37 @@ func TestDeepStackShrinks(t *testing.T) {
 	}
 	vm := must(s.NewVM(ctx))
 	ex := vm.executor()
-	for _, n := range []int64{20000, 10} {
+	call := func(n int64) {
 		if _, err := vm.Call(ctx, vm.Globals().Get(String("g")), Int(n)); err != nil {
 			t.Fatal(err)
 		}
 	}
+	for range 6 { // deep and shallow by turns: kept
+		call(20000)
+		call(10)
+	}
+	if len(ex.stack) < 20_000 {
+		t.Errorf("a VM going deep every other call shrank its stack to %d slots", len(ex.stack))
+	}
+	for range 4 {
+		call(10)
+	}
 	if vm.ex != ex || len(ex.stack) > maxPoolStack || len(ex.pframes) > maxPoolFrames {
-		t.Errorf("a VM after a deep call and a shallow one: stack %d slots, frames %d, same executor %v",
+		t.Errorf("a VM after four shallow calls: stack %d slots, frames %d, same executor %v",
 			len(vm.ex.stack), len(vm.ex.pframes), vm.ex == ex)
+	}
+}
+
+// A name enters the registry only while it holds fewer names than the limit given, so that
+// the names scripts bring cannot crowd out those frozen with a Runtime.
+func TestRegisterLimit(t *testing.T) {
+	n := internedCount.Load()
+	register("registerLimitA", unique.Make("registerLimitA"), n)
+	if _, ok := interned.Load("registerLimitA"); ok || internedCount.Load() != n {
+		t.Error("registered past the limit")
+	}
+	register("registerLimitB", unique.Make("registerLimitB"), n+1)
+	if _, ok := interned.Load("registerLimitB"); !ok {
+		t.Error("not registered below the limit")
 	}
 }
