@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
+	"time"
 )
 
 // GoFunc is the one native signature for host functions. Everything else adapts to it.
@@ -133,8 +134,8 @@ func (c *Call) Charge(n int) error {
 	return c.ex.produce(n)
 }
 
-// Renew gives the entry its step and allocation budgets afresh, as they were when it
-// started. It is for an entry that runs long and waits on its host, such as a session that
+// Renew gives the entry its step and allocation budgets, and its time, afresh, as they were
+// when it started. It is for an entry that runs long and waits on its host, such as a session that
 // reads input or a worker that waits for events: a host function that renews after each
 // wait bounds the work between waits rather than over the entry's whole life. Renew only
 // after a real wait: a script that loops on a function that renews at once is bounded by its
@@ -159,6 +160,9 @@ func (c *Call) Renew() {
 	q := min(tickQuantum, ex.maxSteps)
 	ex.steps, ex.st.ticks = ex.maxSteps-q, int(q)
 	ex.allocLeft = ex.maxAlloc
+	if ex.maxTime > 0 {
+		ex.deadline = time.Now().Add(ex.maxTime)
+	}
 	if e := ex.ectx; e != nil { // a context the function took before carries the budgets afresh
 		e.steps.Store(ex.maxSteps)
 		e.alloc.Store(ex.maxAlloc)

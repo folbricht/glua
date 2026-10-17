@@ -56,6 +56,7 @@ type limits struct {
 	alloc     int64
 	callDepth int
 	hostDepth int
+	time      time.Duration // 0: none
 }
 
 // Lib options are OR-ed together. With none given, LibSafe is used.
@@ -88,6 +89,10 @@ type Limits struct {
 	HostDepth      int   // default 100 nested Go re-entries
 	InitSteps      int64 // defaults to Steps. Used by Load and NewVM for the top level
 	InitAllocBytes int64 // defaults to AllocBytes
+	// Time is how long an entry may run, checked as it takes steps, and given afresh by
+	// Renew; default none. A host function's own time counts, but one that runs long is
+	// not interrupted: it should watch the entry's context.
+	Time time.Duration
 }
 
 func (l Limits) apply(o *options) { o.limits = l }
@@ -359,6 +364,9 @@ func resolveLimits(l Limits, hardened bool) (run, init limits, err error) {
 			return run, init, err
 		}
 	}
+	if l.Time < 0 && l.Time != NoLimit {
+		return run, init, fmt.Errorf("glua: Limits.Time is negative: %v", l.Time)
+	}
 	pick := func(v, def, unlimited int64) int64 {
 		switch v {
 		case 0:
@@ -373,6 +381,7 @@ func resolveLimits(l Limits, hardened bool) (run, init limits, err error) {
 		alloc:     pick(l.AllocBytes, defaultAlloc, math.MaxInt64),
 		callDepth: int(min(pick(int64(l.CallDepth), defaultDepth, maxCallFrames), maxCallFrames)),
 		hostDepth: int(min(pick(int64(l.HostDepth), defaultHost, maxHostDepth), maxHostDepth)),
+		time:      max(l.Time, 0),
 	}
 	init = run
 	init.steps = pick(l.InitSteps, run.steps, math.MaxInt64)
@@ -562,6 +571,7 @@ func (rt *Runtime) newExecutor() *executor {
 func (ex *executor) setLimits(l *limits) {
 	ex.maxSteps, ex.maxAlloc = l.steps, l.alloc
 	ex.maxCallDepth, ex.maxHostDepth = l.callDepth, l.hostDepth
+	ex.maxTime = l.time
 }
 
 // writeFunc is where print and warn write: the Output writer or the OutputFunc function.

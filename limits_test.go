@@ -512,3 +512,35 @@ func TestLongEntryKeepsNothing(t *testing.T) {
 		t.Errorf("after a deep call and a renewal: %d stale slots above the call", stale)
 	}
 }
+
+// Limits.Time ends an entry that runs too long, and Renew gives a long entry's round its
+// time afresh, so that only a round that runs too long ends it.
+func TestTimeLimit(t *testing.T) {
+	rt := MustNew(Limits{Steps: NoLimit, Time: 50 * time.Millisecond},
+		Global("wait", GoFunc(func(c *Call) error {
+			time.Sleep(20 * time.Millisecond)
+			c.Renew()
+			return nil
+		})))
+	s := mustLoad(t, rt, `
+		function spin() pcall(function() while true do end end) end
+		function rounds(n) for i = 1, n do wait() for j = 1, 5000 do end end end -- steps, so the time is checked
+		function slowRound() wait() while true do end end`)
+	ctx := context.Background()
+	start := time.Now()
+	if _, err := s.Call(ctx, s.Globals().Get(String("spin"))); !errors.Is(err, ErrTime) || time.Since(start) > 5*time.Second {
+		t.Errorf("a loop without end: %v after %v", err, time.Since(start))
+	}
+	if _, err := s.Call(ctx, s.Globals().Get(String("rounds")), Int(10)); err != nil {
+		t.Errorf("10 rounds of 20 ms, renewed after each: %v", err)
+	}
+	if _, err := s.Call(ctx, s.Globals().Get(String("slowRound"))); !errors.Is(err, ErrTime) {
+		t.Errorf("a round without end after a renewal: %v", err)
+	}
+	if _, err := New(Limits{Time: -time.Second}); err == nil {
+		t.Error("a negative Time was accepted")
+	}
+	if _, err := New(Limits{Time: NoLimit}); err != nil {
+		t.Errorf("Time: NoLimit: %v", err)
+	}
+}

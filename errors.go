@@ -16,6 +16,7 @@ var (
 	ErrSteps       = errors.New("glua: step limit exceeded")                      // Limits.Steps ran out
 	ErrAlloc       = errors.New("glua: allocation limit exceeded")                // Limits.AllocBytes ran out, or one allocation was over 1 GiB
 	ErrHostDepth   = errors.New("glua: too many nested calls between Go and Lua") // Limits.HostDepth was reached
+	ErrTime        = errors.New("glua: time limit exceeded")                      // Limits.Time ran out
 	ErrUndefined   = errors.New("glua: name is not defined")                      // FuncN or Get named nothing
 	ErrNotFunction = errors.New("glua: value is not a function")                  // FuncN, Call or CallN got something else
 )

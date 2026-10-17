@@ -47,6 +47,7 @@ switches a limit off.
 | `CallDepth` | 10,000 | Lua frames | `stack overflow`, which `pcall` can catch |
 | `HostDepth` | 100 | Nesting of Go and Lua: host functions that call back into Lua, library callbacks such as sort's comparator, scripts called from host functions | `ErrHostDepth`, terminal |
 | `InitSteps`, `InitAllocBytes` | `Steps`, `AllocBytes` | The same, for the top level in `Load` and `NewVM` | As above |
+| `Time` | none | Wall-clock time since the entry started or last renewed, checked every 1,024 steps. A host function that runs long is not interrupted; it should watch the entry's context | `ErrTime`, terminal |
 | context | none | Checked when the entry starts, again every 1,024 steps, and when a host function returns an error | The context's cause, terminal |
 
 `Script.WithLimits` gives the same code and state other limits, for example per tenant. The
@@ -74,9 +75,9 @@ nested call made with an unrelated context gets budgets of its own.
 
 An entry that runs long and waits on its host, such as a session that reads input or a worker
 that waits for events, would run out of any budget in the end. A host function that calls
-`c.Renew()` after each wait gives the entry its step and allocation budgets afresh, so they
-bound the work between waits rather than over the whole entry; `Observe` still counts the
-whole. Renew only after a real wait: a script that loops on a function that renews at once is
+`c.Renew()` after each wait gives the entry its step and allocation budgets, and its `Time`,
+afresh, so they bound the work between waits rather than over the whole entry; `Observe`
+still counts the whole. A deadline on the entry's context still holds for the whole entry. Renew only after a real wait: a script that loops on a function that renews at once is
 bounded by its context alone. A nested call made with `c.Context()` cannot renew the budgets it
 shares, and closers running on the grace budget cannot renew it.
 

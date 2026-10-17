@@ -5,6 +5,7 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 )
 
@@ -124,6 +125,8 @@ type executor struct {
 
 	// what the entry used before its last Renew, which CallStats adds to what it used since
 	renewedSteps, renewedAlloc int64
+	maxTime                    time.Duration // Limits.Time, or 0
+	deadline                   time.Time     // when the entry, or the round since Renew, runs out of time
 	// liveKnown says that collectgarbage measured liveBase bytes live when the entry had
 	// allocated liveAt: its count is that plus what was allocated since
 	liveKnown        bool
@@ -176,6 +179,9 @@ func (ex *executor) call(ctx context.Context, cl *closure, fn, nargs int) (err e
 	q := min(tickQuantum, ex.maxSteps)
 	ex.steps, ex.st.ticks = ex.maxSteps-q, int(q) // set as the entry starts, and by Renew: a nested run shares them
 	ex.allocLeft = ex.maxAlloc
+	if ex.maxTime > 0 {
+		ex.deadline = time.Now().Add(ex.maxTime)
+	}
 	ex.fixed = parent != nil
 	completed := false
 	defer func() {
@@ -406,6 +412,9 @@ func (ex *executor) tableSet(t *Table, k, v Value) error {
 func (ex *executor) refill() error {
 	if ex.ctx.Err() != nil { // never Done(): it allocates a channel on a fresh context
 		return ex.terminal(ctxError(ex.ctx))
+	}
+	if ex.maxTime > 0 && time.Now().After(ex.deadline) {
+		return ex.terminal(ErrTime)
 	}
 	if ex.steps == 0 {
 		return ex.terminal(ErrSteps)
