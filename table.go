@@ -162,7 +162,8 @@ func (t *Table) getSlot(key Value) (Value, int) {
 }
 
 // Set assigns t[key] = val without metamethods. It panics if t is frozen, or if key is nil or NaN.
-// A short string key that is a name is interned, so that Lua code finds it inline.
+// A short string key that is a name gets the pointer the constants of loaded scripts share,
+// so that Lua code finds it inline.
 func (t *Table) Set(key, val Value) {
 	if t.flags&tabFrozen != 0 {
 		panic("glua: attempt to modify a frozen table")
@@ -174,7 +175,7 @@ func (t *Table) Set(key, val Value) {
 		}
 		panic("glua: table index is NaN")
 	}
-	t.set(internKey(key), val)
+	t.set(canonKey(key), val)
 }
 
 // set assigns t[key] = val for a normalised key.

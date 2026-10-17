@@ -263,11 +263,12 @@ func (ti *typeInfo) writable() bool {
 	return false
 }
 
-// interned keeps canonical strings alive for keys that Go code puts in tables: library,
-// global, module and member names, and names given to Table.Set. The hot loop compares key
-// pointers, and the compiler gives constants these canonical pointers, so a key built in Go
-// is found inline only if it is interned. The registry is capped, so a host that builds
-// tables with endless distinct keys cannot make it grow without bound.
+// interned keeps canonical strings alive for the keys of tables that outlive the scripts
+// loaded after them: library, global, module and member names, frozen with the Runtime. The
+// hot loop compares key pointers, and the compiler gives constants these canonical pointers,
+// so such a key is found inline only if its pointer stays canonical. The registry is capped,
+// and keys that Go code puts in tables call by call, which only need to match the constants
+// of scripts already loaded, use canonKey and never enter it.
 var (
 	interned      sync.Map // string -> unique.Handle[string]
 	internedCount atomic.Int64
@@ -296,6 +297,24 @@ func internKey(k Value) Value {
 		internedCount.Add(1)
 	}
 	return String(h.Value())
+}
+
+// canonKey returns k with the canonical pointer of a short name, which the constants of
+// loaded scripts share, for a key Go code puts in a table: Table.Set, or a Go map converted.
+// Unlike internKey it keeps nothing, so a host that makes tables with endless distinct
+// keys, such as IDs, leaves no names behind.
+func canonKey(k Value) Value {
+	if !k.isString() || k.n&lenMask > maxInternedSz {
+		return k
+	}
+	s := k.str()
+	if h, ok := interned.Load(s); ok {
+		return String(h.(unique.Handle[string]).Value())
+	}
+	if !isName(s) {
+		return k
+	}
+	return String(unique.Make(s).Value())
 }
 
 // internKeys gives t's string keys their canonical pointers.
