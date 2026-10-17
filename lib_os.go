@@ -163,6 +163,7 @@ func osDate(c *Call) error {
 		return c.ReturnValues(tableValue(t))
 	}
 	var b strings.Builder
+	charge := building{c: c}
 	for i := 0; i < len(format); i++ {
 		if format[i] != '%' {
 			b.WriteByte(format[i])
@@ -184,8 +185,11 @@ func osDate(c *Call) error {
 			return c.argError(1, "date", fmt.Sprintf("invalid conversion specifier '%%%s'", rest))
 		}
 		strftime(&b, conv, tm)
+		if err := charge.grew(b.Len()); err != nil {
+			return err
+		}
 	}
-	if err := c.ex.produce(b.Len()); err != nil {
+	if err := charge.done(b.Len()); err != nil {
 		return err
 	}
 	return c.ReturnValues(String(b.String()))

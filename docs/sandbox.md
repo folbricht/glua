@@ -43,7 +43,7 @@ switches a limit off.
 | Limit | Default | What it counts | When it runs out |
 | --- | --- | --- | --- |
 | `Steps` | 10 million | Backward jumps, calls, and library work in proportion to its size: a step per 64 bytes a library function produces or a pattern match works through, per comparison in `table.sort`, per 8 values copied for varargs | `ErrSteps`, terminal |
-| `AllocBytes` | 64 MiB | Bytes allocated for the script: tables and their growth, closures, strings, coroutines, stack growth, host functions' results, `load`'s source. It counts what is allocated, not what is live | `ErrAlloc`, terminal |
+| `AllocBytes` | 64 MiB | Bytes allocated for the script: tables and their growth, closures, strings, coroutines, stack growth, host functions' results, `load`'s source. It counts what is allocated, not what is live. A string a library function builds piece by piece (`gsub`, `string.format`, `string.pack`, `table.concat`, `os.date`) is charged as it grows, every 4 KiB, so the limit stops it while it is being made; one piece the size of the whole, as `string.pack`'s `c` pads, is charged before it is made, as `string.rep` is | `ErrAlloc`, terminal |
 | `CallDepth` | 10,000 | Lua frames | `stack overflow`, which `pcall` can catch |
 | `HostDepth` | 100 | Nesting of Go and Lua: host functions that call back into Lua, library callbacks such as sort's comparator, scripts called from host functions | `ErrHostDepth`, terminal |
 | `InitSteps`, `InitAllocBytes` | `Steps`, `AllocBytes` | The same, for the top level in `Load` and `NewVM` | As above |
@@ -125,7 +125,7 @@ These hold even with `NoLimit`, because what they prevent would end the process.
 | Register stack | 1 million slots | `stack overflow` |
 | Lua frames with `CallDepth: NoLimit` | about 1 million | `stack overflow` |
 | Nesting of Go and Lua with `HostDepth: NoLimit` | 10,000 | `ErrHostDepth` |
-| Any single allocation | 1 GiB, checked before the allocation | `ErrAlloc` |
+| Any single allocation | 1 GiB, checked before the allocation; for a string a library function builds piece by piece, as it grows | `ErrAlloc`; `resulting string too large` from the function building it |
 | `string.format` width and precision | two digits, as in C Lua | `invalid conversion` |
 | Go–Lua conversion | 64 levels deep, so cycles end too | A conversion error |
 

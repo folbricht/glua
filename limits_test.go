@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +101,59 @@ func TestCancellation(t *testing.T) {
 	cancel2(cause)
 	if _, err := runLimited(t, rt, cctx, "function f() end"); !errors.Is(err, cause) {
 		t.Errorf("cause: %v", err)
+	}
+}
+
+// A library function that builds a string charges it as it grows, not once it is whole: each
+// of these would build hundreds of MiB or more from little, and meets a 4 MiB budget within a
+// few, or a 5 ms deadline long before it is made.
+func TestResultsChargedAsTheyGrow(t *testing.T) {
+	const mib = "local m = string.rep('x', 1 << 20) "
+	builds := []struct {
+		name, src string
+		// budgetOnly: one piece the size of the whole, charged before it is made as
+		// string.rep's is, which no deadline meets; or output far slower to make than the
+		// step per 64 bytes it is charged, which a deadline meets later on a slow machine
+		budgetOnly bool
+	}{
+		{name: "gsub", src: "function f() return (string.rep('x', 1 << 17):gsub('x', string.rep('y', 4096))) end"},
+		{name: "gsub with %0", src: "function f() return (string.rep('x', 1 << 16):gsub('.+', string.rep('%0', 8192))) end"},
+		{name: "table.concat", src: mib + "function f() local t = {} for i = 1, 500 do t[i] = m end return table.concat(t) end"},
+		{name: "string.format", src: mib + "function f() return string.format(string.rep('%s', 200), table.unpack(setmetatable({}, {__index = function() return m end}), 1, 200)) end"},
+		{name: "string.pack", src: mib + "function f() return string.pack(string.rep('z', 200), table.unpack(setmetatable({}, {__index = function() return m end}), 1, 200)) end"},
+		{name: "string.pack c", src: "function f() return string.pack('c1000000000', '') end", budgetOnly: true},
+		{name: "os.date", src: "function f() return os.date(string.rep('%c', 3 << 18)) end", budgetOnly: true},
+	}
+	for _, b := range builds {
+		for _, c := range []struct {
+			limits Limits
+			within time.Duration
+			want   error
+		}{
+			{Limits{Steps: NoLimit, AllocBytes: 4 << 20}, time.Minute, ErrAlloc},
+			{Limits{Steps: NoLimit, AllocBytes: NoLimit}, 5 * time.Millisecond, context.DeadlineExceeded},
+		} {
+			if b.budgetOnly && c.want != ErrAlloc {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), c.within)
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			start := time.Now()
+			_, err := runLimited(t, MustNew(LibSafe|LibOS, c.limits), ctx, b.src)
+			took := time.Since(start)
+			runtime.ReadMemStats(&after)
+			cancel()
+			if !errors.Is(err, c.want) {
+				t.Errorf("%s: %v, want %v", b.name, err, c.want)
+			}
+			if n := after.TotalAlloc - before.TotalAlloc; c.want == ErrAlloc && n > 64<<20 {
+				t.Errorf("%s: %d MiB allocated before the budget stopped it", b.name, n>>20)
+			}
+			if c.want != ErrAlloc && took > 100*time.Millisecond {
+				t.Errorf("%s: stopped %v after a 5 ms deadline", b.name, took)
+			}
+		}
 	}
 }
 

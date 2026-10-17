@@ -326,6 +326,7 @@ func strGsub(c *Call) error {
 	}
 	ms := &matchState{src: src, pat: p, c: c}
 	var b strings.Builder
+	charge := building{c: c}
 	s, n, lastMatch, changed := 0, int64(0), -1, false
 	for n < maxN {
 		ms.level, ms.depth = 0, 0
@@ -336,13 +337,20 @@ func strGsub(c *Call) error {
 		switch {
 		case e != -1 && e != lastMatch: // a match, but not an empty one right after the last
 			n++
-			ch, err := addValue(c, ms, &b, s, e, repl)
+			ch, err := addValue(c, ms, &b, &charge, s, e, repl)
 			if err != nil {
 				return err
 			}
 			changed = changed || ch
 			if err := c.ex.charge(e - s + 16); err != nil {
 				return err
+			}
+			// until something changed it is a copy of src, given back as it is; the bytes
+			// copied between matches come to no more than src, and are charged with the next
+			if changed {
+				if err := charge.grew(b.Len()); err != nil {
+					return err
+				}
 			}
 			s, lastMatch = e, e
 		case s < len(src):
@@ -360,14 +368,15 @@ done:
 		return c.ReturnValues(c.Value(0), Int(n)) // the original string, as C Lua returns it
 	}
 	b.WriteString(src[s:])
-	if err := c.ex.produce(b.Len()); err != nil {
+	if err := charge.done(b.Len()); err != nil {
 		return err
 	}
 	return c.ReturnValues(String(b.String()), Int(n))
 }
 
-// addValue adds the replacement for the match from s to e.
-func addValue(c *Call, ms *matchState, b *strings.Builder, s, e int, repl Value) (changed bool, err error) {
+// addValue adds the replacement for the match from s to e, charging a string's as each
+// capture is written: %0 over and over writes far more than the match.
+func addValue(c *Call, ms *matchState, b *strings.Builder, charge *building, s, e int, repl Value) (changed bool, err error) {
 	var v Value
 	switch {
 	case repl.isString() || repl.isNumber():
@@ -396,6 +405,9 @@ func addValue(c *Call, ms *matchState, b *strings.Builder, s, e int, repl Value)
 					}
 				}
 				b.WriteString(cv.String())
+				if err := charge.grew(b.Len()); err != nil {
+					return false, err
+				}
 			default:
 				return false, c.libErrorf("invalid use of '%%' in replacement string")
 			}
@@ -450,6 +462,7 @@ func strFormat(c *Call) error {
 		return err
 	}
 	var b strings.Builder
+	charge := building{c: c}
 	arg := 0
 	for i := 0; i < len(f); i++ {
 		if f[i] != '%' {
@@ -588,11 +601,11 @@ func strFormat(c *Call) error {
 			shown, _, _ := strings.Cut(f[start:i+1], "\x00")
 			return c.libErrorf("invalid conversion '%%%s' to 'format'", shown)
 		}
-		if b.Len() > maxAlloc {
-			return c.libErrorf("resulting string too large")
+		if err := charge.grew(b.Len()); err != nil {
+			return err
 		}
 	}
-	if err := c.ex.produce(b.Len()); err != nil {
+	if err := charge.done(b.Len()); err != nil {
 		return err
 	}
 	return c.ReturnValues(String(b.String()))

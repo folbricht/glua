@@ -136,6 +136,7 @@ func tabConcat(c *Call) error {
 		return err
 	}
 	var b strings.Builder
+	charge := building{c: c}
 	for k := i; k <= j; k++ {
 		v, err := c.index(t, Int(k))
 		if err != nil {
@@ -151,14 +152,14 @@ func tabConcat(c *Call) error {
 		if err := c.tickEvery(k); err != nil {
 			return err
 		}
-		if b.Len() > maxAlloc {
-			return c.libErrorf("resulting string too large")
+		if err := charge.grew(b.Len()); err != nil {
+			return err
 		}
 		if k == math.MaxInt64 {
 			break
 		}
 	}
-	if err := c.ex.produce(b.Len()); err != nil {
+	if err := charge.done(b.Len()); err != nil {
 		return err
 	}
 	return c.ReturnValues(String(b.String()))

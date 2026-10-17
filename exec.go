@@ -366,6 +366,40 @@ func (ex *executor) produce(n int) error {
 	return ex.spend(n / 64)
 }
 
+// buildCharge is how many bytes a library function's result may grow by between charges.
+const buildCharge = 4096
+
+// building charges a library function for a result it builds as the result grows, rather
+// than once it is whole: the allocation budget, the steps that look at the context and the
+// single allocation's cap all meet it while it is made.
+type building struct {
+	c       *Call
+	charged int // of the result's length
+}
+
+// grew is told the result's length n as it grows, and charges what was added every
+// buildCharge bytes.
+func (b *building) grew(n int) error {
+	if n-b.charged < buildCharge {
+		return nil
+	}
+	return b.done(n)
+}
+
+// done charges what was added since the last charge, as the result of length n is made: in
+// all, what produce would charge for n bytes at once.
+func (b *building) done(n int) error {
+	if n > maxAlloc {
+		return b.c.libErrorf("resulting string too large")
+	}
+	before := b.charged
+	b.charged = n
+	if err := b.c.ex.charge(n - before); err != nil {
+		return err
+	}
+	return b.c.ex.spend(n/64 - before/64)
+}
+
 // spend takes k steps at once, for library work in proportion to its size.
 func (ex *executor) spend(k int) error {
 	if k <= 0 {

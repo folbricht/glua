@@ -206,6 +206,7 @@ func strPack(c *Call) (err error) {
 	}
 	h := newPackHeader(c, format)
 	var b []byte
+	charge := building{c: c}
 	arg, totalsize := 0, 0
 	for h.pos < len(h.fmt) {
 		opt, size, ntoalign := h.details(totalsize)
@@ -263,10 +264,10 @@ func strPack(c *Call) (err error) {
 			if len(s) > size {
 				return c.argError(arg+1, "pack", "string longer than given size")
 			}
-			b = append(b, s...)
-			for range size - len(s) {
-				b = append(b, 0)
+			if err := charge.grew(len(b) + size); err != nil { // charged before, as string.rep
+				return err
 			}
+			b = append(append(b, s...), make([]byte, size-len(s))...)
 		case kString:
 			s, err := c.checkString(arg, "pack")
 			if err != nil {
@@ -294,11 +295,11 @@ func strPack(c *Call) (err error) {
 		case kPaddAlign, kNop:
 			arg--
 		}
-		if len(b) > maxAlloc {
-			return c.libErrorf("resulting string too large")
+		if err := charge.grew(len(b)); err != nil {
+			return err
 		}
 	}
-	if err := c.ex.produce(len(b)); err != nil {
+	if err := charge.done(len(b)); err != nil {
 		return err
 	}
 	return c.ReturnValues(String(string(b)))
