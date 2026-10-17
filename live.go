@@ -144,12 +144,26 @@ func (vm *VM) LiveBytes() int64 {
 
 // clearDead clears the stack above c's arguments, which calls that have returned left
 // there and which would otherwise stay reachable until the entry ends, as C Lua's collector
-// clears a stack above its top.
+// clears a stack above its top. A stack and frames that a deep call grew far beyond what is
+// in use now shrink, as C Lua's luaD_shrinkstack does.
 func (c *Call) clearDead() {
 	ex := c.ex
-	if end := c.base + c.nargs; end < ex.st.hi {
+	end := c.base + c.nargs
+	if end < ex.st.hi {
 		clear(ex.stack[end:ex.st.hi])
 		ex.st.hi = end
+	}
+	if need := max(end, ex.st.hi, ex.top) + stackSlack; len(ex.stack) > maxPoolStack && len(ex.stack) > 4*need {
+		ex.moveStack(max(initStack, 2*need))
+	}
+	if nf := ex.st.nf + 1; len(ex.pframes) > 1024 && len(ex.pframes) > 4*nf {
+		ex.pframes = append(make([]uint64, 0, max(64, 2*nf)), ex.pframes[:max(64, 2*nf)]...)
+		if len(ex.nvar) > len(ex.pframes) {
+			ex.nvar = append([]int32(nil), ex.nvar[:len(ex.pframes)]...)
+		}
+		if len(ex.cont) > len(ex.pframes) {
+			ex.cont = append([]int32(nil), ex.cont[:len(ex.pframes)]...)
+		}
 	}
 }
 

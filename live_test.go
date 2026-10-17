@@ -129,3 +129,39 @@ func TestCollectGarbageCount(t *testing.T) {
 		t.Errorf("after collect: %d stale slots above the call", stale)
 	}
 }
+
+// A stack and frames that one deep call grew shrink again: at Renew in a long entry, and
+// between the calls of a VM, which lets go of such an executor as the pool does.
+func TestDeepStackShrinks(t *testing.T) {
+	var stack, frames []int
+	rt := MustNew(LibSafe, Limits{Steps: NoLimit, AllocBytes: NoLimit, CallDepth: 50_000},
+		Global("renew", GoFunc(func(c *Call) error {
+			stack = append(stack, len(c.ex.stack))
+			frames = append(frames, len(c.ex.pframes))
+			c.Renew()
+			stack = append(stack, len(c.ex.stack))
+			frames = append(frames, len(c.ex.pframes))
+			return nil
+		})))
+	s := mustLoad(t, rt, `
+		local function deep(n) if n > 0 then return 1 + deep(n - 1) end return 0 end
+		function f() deep(20000) renew() return deep(10) end
+		function g() return deep(20000) end`)
+	ctx := context.Background()
+	if _, err := s.Call(ctx, s.Globals().Get(String("f"))); err != nil {
+		t.Fatal(err)
+	}
+	if stack[0] < 20_000 || stack[1] > maxPoolStack || frames[0] < 20_000 || frames[1] > 1024 {
+		t.Errorf("stack %v slots and frames %v, before and after Renew", stack, frames)
+	}
+	vm := must(s.NewVM(ctx))
+	if _, err := vm.Call(ctx, vm.Globals().Get(String("g"))); err != nil {
+		t.Fatal(err)
+	}
+	if vm.ex != nil {
+		t.Errorf("the VM keeps a stack of %d slots between calls", len(vm.ex.stack))
+	}
+	if got, err := vm.Call(ctx, vm.Globals().Get(String("g"))); err != nil || got.String() != "20000" {
+		t.Errorf("called again: %v, %v", got, err)
+	}
+}

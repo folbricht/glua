@@ -33,7 +33,7 @@ func (s *Script) NewVM(ctx context.Context) (*VM, error) {
 		vm.result = append(vm.result, ex.stack[:ex.top]...)
 	}
 	rt.observeEntry(ex, s.name, "", err)
-	ex.reset()
+	vm.leave(ex)
 	if err != nil {
 		return nil, err
 	}
@@ -67,9 +67,13 @@ func (vm *VM) enter() *executor {
 	return ex
 }
 
-// leave clears the executor after a call.
+// leave clears the executor after a call. One whose stack a deep call grew is let go, as
+// the pool lets go of one, so that the VM does not keep the stack between calls.
 func (vm *VM) leave(ex *executor) {
 	ex.reset()
+	if len(ex.stack) > maxPoolStack && vm.ex == ex {
+		vm.ex = nil
+	}
 }
 
 // Globals returns the VM's globals table, which is not frozen.
