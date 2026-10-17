@@ -69,15 +69,15 @@
 //
 // # Limits
 //
-// Every entry from Go runs under [Limits]: a step budget, an allocation budget, a call depth
-// and a depth of nesting between Go and Lua. A zero field takes its default, so a Runtime made
-// with no options is bounded. Running out of steps or bytes, nesting too deep and a cancelled
-// context are terminal errors: pcall cannot catch them, and the entry returns them as an
-// [*Error] that wraps [ErrSteps], [ErrAlloc], [ErrHostDepth] or the context's cause. A host
-// function ends the entry the same way by returning an error made with [Terminate]. A set of
-// fixed caps holds even with [NoLimit]. [Hardened] is the profile for untrusted scripts. An
-// entry that runs long and waits on its host can have its budgets renewed after each wait,
-// with [Call.Renew].
+// Every entry from Go runs under [Limits]: a step budget, an allocation budget, a call depth,
+// a depth of nesting between Go and Lua and, if set, a time. A zero field takes its default,
+// so a Runtime made with no options is bounded. Running out of steps, bytes or time, nesting
+// too deep and a cancelled context are terminal errors: pcall cannot catch them, and the
+// entry returns them as an [*Error] that wraps [ErrSteps], [ErrAlloc], [ErrTime],
+// [ErrHostDepth] or the context's cause. A host function ends the entry the same way by
+// returning an error made with [Terminate]. A set of fixed caps holds even with [NoLimit].
+// [Hardened] is the profile for untrusted scripts. An entry that runs long and waits on its
+// host can have its budgets and time renewed after each wait, with [Call.Renew].
 //
 // The documents under docs/ in the repository describe the sandbox and limits in full, the
 // ways glua differs from Lua 5.4, and how common tasks look in GopherLua and in glua.

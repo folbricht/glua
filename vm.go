@@ -67,13 +67,11 @@ func (vm *VM) enter() *executor {
 	return ex
 }
 
-// leave clears the executor after a call. One whose stack a deep call grew is let go, as
-// the pool lets go of one, so that the VM does not keep the stack between calls.
+// leave clears the executor after a call, and shrinks a stack that the call did not use.
 func (vm *VM) leave(ex *executor) {
+	used := ex.st.hi
 	ex.reset()
-	if len(ex.stack) > maxPoolStack && vm.ex == ex {
-		vm.ex = nil
-	}
+	ex.shrink(used)
 }
 
 // Globals returns the VM's globals table, which is not frozen.

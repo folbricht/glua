@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"runtime"
 	"strings"
 	"testing"
 	"unique"
@@ -302,5 +303,31 @@ func TestGoKeysKeepNothing(t *testing.T) {
 	}
 	if got, err := s.Call(context.Background(), s.Globals().Get(String("f")), tableValue(tab)); err != nil || got.String() != "GET" {
 		t.Errorf("t.method: %v, %v", got, err)
+	}
+}
+
+// A table frozen in Go keeps the canonical pointers of its keys for scripts loaded after it,
+// even when nothing else holds the name meanwhile.
+func TestFrozenGoTableKeysStayCanonical(t *testing.T) {
+	tab := NewTable(0, 1)
+	tab.Set(String(strings.Clone("frozenGoTableKey")), String("v"))
+	if err := tab.Freeze(); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		runtime.GC()
+	}
+	s := mustLoad(t, MustNew(), `function f(t) return t.frozenGoTableKey end`)
+	var k unsafe.Pointer
+	for i := range tab.nodes {
+		if tab.nodes[i].k.isString() {
+			k = tab.nodes[i].k.p
+		}
+	}
+	if k != unsafe.Pointer(unsafe.StringData(unique.Make("frozenGoTableKey").Value())) {
+		t.Error("the frozen key lost the pointer the script's constant has")
+	}
+	if got, err := s.Call(context.Background(), s.Globals().Get(String("f")), tableValue(tab)); err != nil || got.String() != "v" {
+		t.Errorf("t.frozenGoTableKey: %v, %v", got, err)
 	}
 }

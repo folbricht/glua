@@ -90,8 +90,9 @@ type Limits struct {
 	InitSteps      int64 // defaults to Steps. Used by Load and NewVM for the top level
 	InitAllocBytes int64 // defaults to AllocBytes
 	// Time is how long an entry may run, checked as it takes steps, and given afresh by
-	// Renew; default none. A host function's own time counts, but one that runs long is
-	// not interrupted: it should watch the entry's context.
+	// Renew; default none. A nested entry made with a host function's Call.Context ends
+	// with it. A host function's own time counts, but one that runs long is not
+	// interrupted: Call.Context's Deadline tells it when the time runs out.
 	Time time.Duration
 }
 

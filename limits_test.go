@@ -544,3 +544,45 @@ func TestTimeLimit(t *testing.T) {
 		t.Errorf("Time: NoLimit: %v", err)
 	}
 }
+
+// Limits.Time reaches what the entry does on its behalf: a nested entry made with the host
+// function's Context ends with the entry's time, the Context reports it as a deadline, and a
+// host function that charges for its work as it goes is told when the time runs out.
+func TestTimeLimitNested(t *testing.T) {
+	var s *Script
+	var deadline time.Time
+	rt := MustNew(Limits{Steps: NoLimit, AllocBytes: NoLimit, Time: 100 * time.Millisecond},
+		Global("nested", GoFunc(func(c *Call) error {
+			time.Sleep(60 * time.Millisecond)
+			ctx := c.Context()
+			deadline, _ = ctx.Deadline()
+			_, err := s.Call(ctx, s.Globals().Get(String("spin")))
+			return err
+		})),
+		Global("chunks", GoFunc(func(c *Call) error {
+			for end := time.Now().Add(2 * time.Second); time.Now().Before(end); {
+				if err := c.Charge(64 << 10); err != nil {
+					return err
+				}
+				time.Sleep(time.Millisecond) // a chunk of the host's own work
+			}
+			return nil
+		})))
+	s = mustLoad(t, rt, `
+		function spin() while true do end end
+		function outer() return nested() end
+		function work() return chunks() end`)
+	ctx := context.Background()
+	start := time.Now()
+	_, err := s.Call(ctx, s.Globals().Get(String("outer")))
+	if took := time.Since(start); !errors.Is(err, ErrTime) || took > 150*time.Millisecond {
+		t.Errorf("a nested entry spinning: %v after %v, want ErrTime at 100 ms", err, took)
+	}
+	if d := deadline.Sub(start); d < 90*time.Millisecond || d > 110*time.Millisecond {
+		t.Errorf("Context's deadline is %v after the start, want 100 ms", d)
+	}
+	start = time.Now()
+	if _, err := s.Call(ctx, s.Globals().Get(String("work"))); !errors.Is(err, ErrTime) || time.Since(start) > 300*time.Millisecond {
+		t.Errorf("a host function charging for its work in chunks: %v after %v, want ErrTime at 100 ms", err, time.Since(start))
+	}
+}

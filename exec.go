@@ -10,16 +10,17 @@ import (
 )
 
 const (
-	stackSlack   = 256      // free slots above any frame base, so a frame can be viewed as *[256]Value
-	initStack    = 512      // 8 KB of registers
-	maxPoolStack = 4096     // an executor whose stack grew beyond 64 KB is not pooled
-	maxStack     = 1 << 20  // fixed cap: register stack slots
-	tickQuantum  = 1024     // steps handed to the loop between refills
-	defaultSteps = 10000000 // Limits.Steps default
-	defaultDepth = 10000    // Limits.CallDepth default
-	defaultHost  = 100      // Limits.HostDepth default
-	defaultAlloc = 64 << 20 // Limits.AllocBytes default
-	maxIndexHops = 2000     // fixed cap: __index, __newindex and __call chains
+	stackSlack    = 256      // free slots above any frame base, so a frame can be viewed as *[256]Value
+	initStack     = 512      // 8 KB of registers
+	maxPoolStack  = 4096     // an executor whose stack grew beyond 64 KB is not pooled
+	maxPoolFrames = 1024     // nor one whose frames grew beyond 8 KB
+	maxStack      = 1 << 20  // fixed cap: register stack slots
+	tickQuantum   = 1024     // steps handed to the loop between refills
+	defaultSteps  = 10000000 // Limits.Steps default
+	defaultDepth  = 10000    // Limits.CallDepth default
+	defaultHost   = 100      // Limits.HostDepth default
+	defaultAlloc  = 64 << 20 // Limits.AllocBytes default
+	maxIndexHops  = 2000     // fixed cap: __index, __newindex and __call chains
 )
 
 // Frame flags, in the top byte of a frame record. RETURN tests them all at once.
@@ -126,7 +127,7 @@ type executor struct {
 	// what the entry used before its last Renew, which CallStats adds to what it used since
 	renewedSteps, renewedAlloc int64
 	maxTime                    time.Duration // Limits.Time, or 0
-	deadline                   time.Time     // when the entry, or the round since Renew, runs out of time
+	deadline                   time.Time     // when the entry, or the round since Renew, runs out of time; zero for never
 	// liveKnown says that collectgarbage measured liveBase bytes live when the entry had
 	// allocated liveAt: its count is that plus what was allocated since
 	liveKnown        bool
@@ -179,8 +180,14 @@ func (ex *executor) call(ctx context.Context, cl *closure, fn, nargs int) (err e
 	q := min(tickQuantum, ex.maxSteps)
 	ex.steps, ex.st.ticks = ex.maxSteps-q, int(q) // set as the entry starts, and by Renew: a nested run shares them
 	ex.allocLeft = ex.maxAlloc
+	ex.deadline = time.Time{}
 	if ex.maxTime > 0 {
 		ex.deadline = time.Now().Add(ex.maxTime)
+	}
+	if parent != nil { // a nested entry ends when the entry that made it runs out of time
+		if n := parent.deadline.Load(); n != 0 && (ex.deadline.IsZero() || n < ex.deadline.UnixNano()) {
+			ex.deadline = time.Unix(0, n)
+		}
 	}
 	ex.fixed = parent != nil
 	completed := false
@@ -281,7 +288,7 @@ func (ex *executor) reset() {
 
 // release returns an executor to the pool, unless it ended abnormally or has grown large.
 func release(pool *sync.Pool, ex *executor) {
-	if !ex.poisoned && len(ex.stack) <= maxPoolStack {
+	if !ex.poisoned && len(ex.stack) <= maxPoolStack && len(ex.pframes) <= maxPoolFrames {
 		pool.Put(ex)
 	}
 }
@@ -385,8 +392,17 @@ func (ex *executor) spend(k int) error {
 	}
 	ex.steps -= need
 	ex.st.ticks = 0
-	if ex.ctx.Err() != nil {
+	return ex.interrupted()
+}
+
+// interrupted reports a cancelled context or the entry's time run out, as a terminal error.
+// The loop asks at each refill, and library work as it takes its steps.
+func (ex *executor) interrupted() error {
+	if ex.ctx.Err() != nil { // never Done(): it allocates a channel on a fresh context
 		return ex.terminal(ctxError(ex.ctx))
+	}
+	if !ex.deadline.IsZero() && time.Now().After(ex.deadline) {
+		return ex.terminal(ErrTime)
 	}
 	return nil
 }
@@ -410,11 +426,8 @@ func (ex *executor) tableSet(t *Table, k, v Value) error {
 //
 //go:noinline
 func (ex *executor) refill() error {
-	if ex.ctx.Err() != nil { // never Done(): it allocates a channel on a fresh context
-		return ex.terminal(ctxError(ex.ctx))
-	}
-	if ex.maxTime > 0 && time.Now().After(ex.deadline) {
-		return ex.terminal(ErrTime)
+	if err := ex.interrupted(); err != nil {
+		return err
 	}
 	if ex.steps == 0 {
 		return ex.terminal(ErrSteps)

@@ -144,25 +144,34 @@ func (vm *VM) LiveBytes() int64 {
 
 // clearDead clears the stack above c's arguments, which calls that have returned left
 // there and which would otherwise stay reachable until the entry ends, as C Lua's collector
-// clears a stack above its top. A stack and frames that a deep call grew far beyond what is
-// in use now shrink, as C Lua's luaD_shrinkstack does.
+// clears a stack above its top, and shrinks a stack that the entry has stopped using.
 func (c *Call) clearDead() {
 	ex := c.ex
-	end := c.base + c.nargs
+	end, peak := c.base+c.nargs, ex.st.hi // the most the stack held since the last clearing
 	if end < ex.st.hi {
 		clear(ex.stack[end:ex.st.hi])
 		ex.st.hi = end
 	}
-	if need := max(end, ex.st.hi, ex.top) + stackSlack; len(ex.stack) > maxPoolStack && len(ex.stack) > 4*need {
+	ex.shrink(max(peak, end, ex.top))
+}
+
+// shrink gives back a stack and frames that a deep call grew, as C Lua's luaD_shrinkstack
+// does, once they are past what the pool keeps and four times what was used since the last
+// shrink: used is the most stack slots held since. An entry that goes deep round after round
+// keeps what it grew, rather than paying to grow it again each time. The frames follow the
+// stack: every frame takes at least a slot.
+func (ex *executor) shrink(used int) {
+	need := used + stackSlack
+	if len(ex.stack) > maxPoolStack && len(ex.stack) > 4*need {
 		ex.moveStack(max(initStack, 2*need))
 	}
-	if nf := ex.st.nf + 1; len(ex.pframes) > 1024 && len(ex.pframes) > 4*nf {
-		ex.pframes = append(make([]uint64, 0, max(64, 2*nf)), ex.pframes[:max(64, 2*nf)]...)
-		if len(ex.nvar) > len(ex.pframes) {
-			ex.nvar = append([]int32(nil), ex.nvar[:len(ex.pframes)]...)
+	if n := max(64, 2*need, 2*(ex.st.nf+1)); len(ex.pframes) > maxPoolFrames && len(ex.pframes) > 2*n {
+		ex.pframes = append(make([]uint64, 0, n), ex.pframes[:n]...)
+		if len(ex.nvar) > n {
+			ex.nvar = append([]int32(nil), ex.nvar[:n]...)
 		}
-		if len(ex.cont) > len(ex.pframes) {
-			ex.cont = append([]int32(nil), ex.cont[:len(ex.pframes)]...)
+		if len(ex.cont) > n {
+			ex.cont = append([]int32(nil), ex.cont[:n]...)
 		}
 	}
 }
