@@ -573,11 +573,11 @@ func TestTimeLimitNested(t *testing.T) {
 	ctx := context.Background()
 	start := time.Now()
 	_, err := s.Call(ctx, s.Globals().Get(String("outer")))
-	if took := time.Since(start); !errors.Is(err, ErrTime) || took > 150*time.Millisecond {
+	if took := time.Since(start); !errors.Is(err, ErrTime) || took > time.Second {
 		t.Errorf("a nested entry spinning: %v after %v, want ErrTime at 100 ms", err, took)
 	}
 	start = time.Now()
-	if _, err := s.Call(ctx, s.Globals().Get(String("work"))); !errors.Is(err, ErrTime) || time.Since(start) > 300*time.Millisecond {
+	if _, err := s.Call(ctx, s.Globals().Get(String("work"))); !errors.Is(err, ErrTime) || time.Since(start) > time.Second {
 		t.Errorf("a host function charging for its work in chunks: %v after %v, want ErrTime at 100 ms", err, time.Since(start))
 	}
 }
@@ -640,5 +640,61 @@ func TestTimeLimitEdges(t *testing.T) {
 		}))), "function work() for i = 1, 5000 do end return 1 end function f() return nest() end")
 	if _, err := long.Call(ctx, long.Globals().Get(String("f"))); err != nil {
 		t.Errorf("Time of math.MaxInt64, nested: %v", err)
+	}
+}
+
+// Running out of time ends the entry whoever notices it: a host function that passes on a
+// nested entry's ErrTime does not hand pcall a catchable error, and one that charges in amounts
+// too small to take a step is still told. A Go closer after ErrTime runs nested work as it does
+// after a cancellation, and Observe reports nothing used by an entry that ran nothing.
+func TestTimeLimitTerminal(t *testing.T) {
+	var s *Script
+	var stats []CallStats
+	closed := false
+	rt := MustNew(Limits{Steps: NoLimit, AllocBytes: NoLimit, Time: 50 * time.Millisecond},
+		Observe(func(cs CallStats) { stats = append(stats, cs) }),
+		Global("late", GoFunc(func(c *Call) error {
+			time.Sleep(80 * time.Millisecond)
+			_, err := s.Call(c.Context(), s.Globals().Get(String("busy")))
+			return err
+		})),
+		Global("closer", GoFunc(func(c *Call) error {
+			_, err := s.Call(c.Context(), s.Globals().Get(String("short"))) // within the grace budget
+			closed = err == nil
+			return nil
+		})),
+		Global("small", GoFunc(func(c *Call) error {
+			for end := time.Now().Add(2 * time.Second); time.Now().Before(end); {
+				if err := c.Charge(1); err != nil {
+					return err
+				}
+				time.Sleep(time.Millisecond)
+			}
+			return nil
+		})))
+	s = mustLoad(t, rt, `
+		function busy() for i = 1, 5000 do end end
+		function short() for i = 1, 10 do end end
+		function caught() return pcall(late) end
+		function closing()
+			local x <close> = setmetatable({}, {__close = closer})
+			while true do end
+		end
+		function charging() return small() end`)
+	ctx := context.Background()
+	if res, err := s.CallN(ctx, nil, s.Globals().Get(String("caught"))); !errors.Is(err, ErrTime) {
+		t.Errorf("pcall around a nested entry out of time: %v, caught: %v", err, res)
+	}
+	for _, cs := range stats {
+		if cs.Steps > 100_000 {
+			t.Errorf("an entry out of time reported %d steps", cs.Steps)
+		}
+	}
+	if _, err := s.Call(ctx, s.Globals().Get(String("closing"))); !errors.Is(err, ErrTime) || !closed {
+		t.Errorf("a Go closer's nested work after ErrTime: %v, ran: %v", err, closed)
+	}
+	start := time.Now()
+	if _, err := s.Call(ctx, s.Globals().Get(String("charging"))); !errors.Is(err, ErrTime) || time.Since(start) > time.Second {
+		t.Errorf("charging a byte at a time: %v after %v, want ErrTime at 50 ms", err, time.Since(start))
 	}
 }

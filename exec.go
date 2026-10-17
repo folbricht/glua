@@ -186,15 +186,15 @@ func (ex *executor) call(ctx context.Context, cl *closure, fn, nargs int) (err e
 			ex.deadline = n
 		}
 	}
+	q := min(tickQuantum, ex.maxSteps)
+	ex.steps, ex.st.ticks = ex.maxSteps-q, int(q) // set as the entry starts, and by Renew: a nested run shares them
+	ex.allocLeft = ex.maxAlloc
 	if ex.deadline != 0 && monoNow() >= ex.deadline {
 		return ErrTime // as a cancelled context: out of time before it starts, it runs nothing
 	}
 	// ex.types stays from entry to entry: plans are only ever added, and plan reloads the
 	// list when it meets a type bound since
 	ex.running, ex.ctx = true, ctx
-	q := min(tickQuantum, ex.maxSteps)
-	ex.steps, ex.st.ticks = ex.maxSteps-q, int(q) // set as the entry starts, and by Renew: a nested run shares them
-	ex.allocLeft = ex.maxAlloc
 	ex.fixed = parent != nil
 	completed := false
 	defer func() {

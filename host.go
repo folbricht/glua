@@ -135,6 +135,9 @@ func (c *Call) Charge(n int) error {
 	if n < 0 {
 		return nil
 	}
+	if ex := c.ex; ex.deadline != 0 && monoNow() >= ex.deadline {
+		return ex.terminal(ErrTime) // at every charge: one too small to take a step still checks
+	}
 	return c.ex.produce(n)
 }
 
@@ -346,6 +349,9 @@ func (ex *executor) hostFailed(c *Call, err error) error {
 	}
 	if ex.ctx.Err() != nil {
 		return ex.terminal(ctxError(ex.ctx))
+	}
+	if ex.deadline != 0 && monoNow() >= ex.deadline {
+		return ex.terminal(ErrTime) // such as a nested entry's ErrTime, which is the entry's too
 	}
 	return ex.hostError(c, err)
 }

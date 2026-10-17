@@ -288,27 +288,35 @@ const (
 // chooses, may fill the registry; those that compiled scripts and Table.Freeze bring, which
 // may never end, fill at most maxDynamic of it, so that they cannot crowd out the others.
 func internKey(k Value, limit int64) Value {
-	if !k.isString() || k.n&lenMask > maxInternedSz {
+	if !k.isString() {
 		return k
 	}
 	s := k.str()
 	if h, ok := interned.Load(s); ok {
 		return String(h.(unique.Handle[string]).Value())
 	}
-	if !isName(s) || internedCount.Load() >= limit {
+	if !registrable(s, limit) {
 		return k
 	}
 	h := unique.Make(s)
-	register(s, h, limit)
+	keepName(s, h)
 	return String(h.Value())
 }
 
-// register keeps h, the canonical s, in the registry if s is a short name and the registry
-// holds fewer than limit names.
+// register keeps h, the canonical s, in the registry if registrable allows it.
 func register(s string, h unique.Handle[string], limit int64) {
-	if len(s) > maxInternedSz || !isName(s) || internedCount.Load() >= limit {
-		return
+	if registrable(s, limit) {
+		keepName(s, h)
 	}
+}
+
+// registrable reports whether s may enter the registry: a short name, while the registry
+// holds fewer than limit names.
+func registrable(s string, limit int64) bool {
+	return len(s) <= maxInternedSz && isName(s) && internedCount.Load() < limit
+}
+
+func keepName(s string, h unique.Handle[string]) {
 	if _, loaded := interned.LoadOrStore(s, h); !loaded {
 		internedCount.Add(1)
 	}

@@ -77,7 +77,8 @@ An entry that runs long and waits on its host, such as a session that reads inpu
 that waits for events, would run out of any budget in the end. A host function that calls
 `c.Renew()` after each wait gives the entry its step and allocation budgets, and its `Time`,
 afresh, so they bound the work between waits rather than over the whole entry; `Observe`
-still counts the whole. A deadline on the entry's context still holds for the whole entry. Renew only after a real wait: a script that loops on a function that renews at once is
+still counts the whole. A deadline on the entry's context still holds for the whole entry.
+Renew only after a real wait: a script that loops on a function that renews at once is
 bounded by its context alone. A nested call made with `c.Context()` cannot renew the budgets it
 shares, and closers running on the grace budget cannot renew it.
 
