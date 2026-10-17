@@ -399,13 +399,14 @@ func (ex *executor) closeTerminal(level int, le *Error) {
 	}
 	steps, ticks, alloc, fatal, fixed := ex.steps, ex.st.ticks, ex.allocLeft, ex.fatal, ex.fixed
 	ex.steps, ex.st.ticks, ex.allocLeft, ex.fatal, ex.fixed = 0, tickQuantum, 4<<10, nil, true
-	ctx := ex.ctx
+	ctx, deadline := ex.ctx, ex.deadline
 	if ctx.Err() != nil {
 		ex.ctx = context.WithoutCancel(ctx) // let the closers run after a cancellation
 	}
+	ex.deadline = 0 // or after the time ran out: the grace budget bounds them
 	ex.closeOnError(level, le.Value, true)
 	ex.dropTBC(level)
-	ex.ctx = ctx
+	ex.ctx, ex.deadline = ctx, deadline
 	ex.steps, ex.st.ticks, ex.allocLeft, ex.fatal, ex.fixed = steps, ticks, alloc, fatal, fixed
 }
 

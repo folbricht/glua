@@ -165,7 +165,7 @@ func TestLimitsResolve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run != (limits{defaultSteps, defaultAlloc, defaultDepth, defaultHost}) || init != run {
+	if run != (limits{defaultSteps, defaultAlloc, defaultDepth, defaultHost, 0}) || init != run {
 		t.Errorf("defaults: %+v %+v", run, init)
 	}
 	run, init, _ = resolveLimits(Limits{Steps: 5, InitSteps: NoLimit, AllocBytes: NoLimit, HostDepth: NoLimit}, false)

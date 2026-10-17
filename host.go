@@ -46,6 +46,7 @@ func (c *Call) Context() context.Context {
 	e.steps.Store(ex.steps + int64(max(ex.st.ticks, 0)))
 	e.alloc.Store(ex.allocLeft)
 	e.depth.Store(int64(ex.maxHostDepth - ex.depth))
+	e.deadline.Store(ex.deadline)
 	return e
 }
 
@@ -57,6 +58,10 @@ type entryCtx struct {
 	context.Context
 	steps, alloc, depth  atomic.Int64
 	usedSteps, usedAlloc atomic.Int64
+	// when Limits.Time runs out for the entry, on monoNow's clock, or 0, for the entries made
+	// with it. Not the context's Deadline: Done does not close then, and a context derived
+	// with a timeout of its own would trust the parent's Done and drop its own timer.
+	deadline atomic.Int64
 }
 
 type budgetKey struct{}
@@ -130,11 +135,14 @@ func (c *Call) Charge(n int) error {
 	if n < 0 {
 		return nil
 	}
+	if ex := c.ex; ex.deadline != 0 && monoNow() >= ex.deadline {
+		return ex.terminal(ErrTime) // at every charge: one too small to take a step still checks
+	}
 	return c.ex.produce(n)
 }
 
-// Renew gives the entry its step and allocation budgets afresh, as they were when it
-// started. It is for an entry that runs long and waits on its host, such as a session that
+// Renew gives the entry its step and allocation budgets, and its time, afresh, as they were
+// when it started. It is for an entry that runs long and waits on its host, such as a session that
 // reads input or a worker that waits for events: a host function that renews after each
 // wait bounds the work between waits rather than over the entry's whole life. Renew only
 // after a real wait: a script that loops on a function that renews at once is bounded by its
@@ -151,6 +159,9 @@ func (c *Call) Renew() {
 		ex.charge(0) // the stack grew past the budget, and this is the charge that fails
 		return
 	}
+	if ex.maxTime > 0 { // first: the wait may have outlasted the old deadline, which paying must not see
+		ex.deadline = monoAfter(ex.maxTime)
+	}
 	if ex.ectx != nil && ex.payBorrowed() != nil {
 		return // what nested entries used came out of the old budgets, and ran them out
 	}
@@ -162,6 +173,7 @@ func (c *Call) Renew() {
 	if e := ex.ectx; e != nil { // a context the function took before carries the budgets afresh
 		e.steps.Store(ex.maxSteps)
 		e.alloc.Store(ex.maxAlloc)
+		e.deadline.Store(ex.deadline)
 	}
 	c.clearDead()
 }
@@ -337,6 +349,9 @@ func (ex *executor) hostFailed(c *Call, err error) error {
 	}
 	if ex.ctx.Err() != nil {
 		return ex.terminal(ctxError(ex.ctx))
+	}
+	if ex.deadline != 0 && monoNow() >= ex.deadline {
+		return ex.terminal(ErrTime) // such as a nested entry's ErrTime, which is the entry's too
 	}
 	return ex.hostError(c, err)
 }

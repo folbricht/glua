@@ -47,6 +47,7 @@ switches a limit off.
 | `CallDepth` | 10,000 | Lua frames | `stack overflow`, which `pcall` can catch |
 | `HostDepth` | 100 | Nesting of Go and Lua: host functions that call back into Lua, library callbacks such as sort's comparator, scripts called from host functions | `ErrHostDepth`, terminal |
 | `InitSteps`, `InitAllocBytes` | `Steps`, `AllocBytes` | The same, for the top level in `Load` and `NewVM` | As above |
+| `Time` | none | Wall-clock time since the entry started or last renewed, checked every 1,024 steps and when a host function charges for its work. Nested entries made with a host function's `Context` end with it; a host function that runs long is not interrupted, nor is its context cancelled | `ErrTime`, terminal |
 | context | none | Checked when the entry starts, again every 1,024 steps, and when a host function returns an error | The context's cause, terminal |
 
 `Script.WithLimits` gives the same code and state other limits, for example per tenant. The
@@ -60,9 +61,9 @@ returning an error made with `lua.Terminate`, end the entry:
 - `pcall`, `xpcall`, message handlers and `coroutine.resume` never see them.
 - After a host function returns, the error stands, whatever the function did with it.
 - `__close` handlers written in Lua still run, sharing a grace budget of 1,024 steps and 4 KB.
-- The entry returns an `*lua.Error` that unwraps to `ErrSteps`, `ErrAlloc`, `ErrHostDepth`,
-  the context's cause or the error given to `Terminate`, with the script's position and
-  traceback.
+- The entry returns an `*lua.Error` that unwraps to `ErrSteps`, `ErrAlloc`, `ErrTime`,
+  `ErrHostDepth`, the context's cause or the error given to `Terminate`, with the script's
+  position and traceback.
 
 ### Budgets across scripts
 
@@ -74,31 +75,12 @@ nested call made with an unrelated context gets budgets of its own.
 
 An entry that runs long and waits on its host, such as a session that reads input or a worker
 that waits for events, would run out of any budget in the end. A host function that calls
-`c.Renew()` after each wait gives the entry its step and allocation budgets afresh, so they
-bound the work between waits rather than over the whole entry; `Observe` still counts the
-whole. Renew only after a real wait: a script that loops on a function that renews at once is
+`c.Renew()` after each wait gives the entry its step and allocation budgets, and its `Time`,
+afresh, so they bound the work between waits rather than over the whole entry; `Observe`
+still counts the whole. A deadline on the entry's context still holds for the whole entry.
+Renew only after a real wait: a script that loops on a function that renews at once is
 bounded by its context alone. A nested call made with `c.Context()` cannot renew the budgets it
 shares, and closers running on the grace budget cannot renew it.
-
-A time limit for each round between waits needs no option: run the entry with a context the
-host can cancel, and a timer that the host function stops while it waits and starts again as
-it renews.
-
-```go
-ctx, cancel := context.WithCancelCause(parent)
-defer cancel(nil)
-round := time.AfterFunc(time.Second, func() { cancel(errRoundTooLong) })
-defer round.Stop()
-
-// in the host function, around each wait:
-round.Stop()
-wait()
-round.Reset(time.Second)
-c.Renew()
-```
-
-A round that runs past the second, not counting the waits, ends the entry with
-`errRoundTooLong`, terminal like any cancelled context.
 
 ### Memory an entry keeps
 
