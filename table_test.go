@@ -505,3 +505,91 @@ func TestShortKeysHashInline(t *testing.T) {
 		}
 	}
 }
+
+func tabOf(v Value) *Table {
+	if v.isObj(kindTable) {
+		return (*Table)(v.p)
+	}
+	return nil
+}
+
+// checkScalarArrays walks the tables reachable from v and reports any whose array part is
+// memory the GC does not scan but holds a pointer: such a pointer is invisible to the GC.
+func checkScalarArrays(t *testing.T, v Value, seen map[*Table]bool) {
+	t.Helper()
+	if !v.isObj(kindTable) {
+		return
+	}
+	tab := (*Table)(v.p)
+	if seen[tab] {
+		return
+	}
+	seen[tab] = true
+	if !tab.ptrArr && !scalars(tab.arr) {
+		t.Errorf("a table's unscanned array part holds a pointer: %v", tab.arr)
+	}
+	for _, x := range tab.arr {
+		checkScalarArrays(t, x, seen)
+	}
+	for _, nd := range tab.nodes {
+		checkScalarArrays(t, nd.k, seen)
+		checkScalarArrays(t, nd.v, seen)
+	}
+}
+
+// Every way a value gets into an array part keeps pointers out of one the GC does not scan:
+// each array below starts with numbers and then takes strings or tables, and the values
+// survive collections.
+func TestScalarArraysTakePointers(t *testing.T) {
+	src := `
+		local s = function(i) return ("s"):rep(i) .. i end -- strings built at run time
+		local r = {}
+		local a = {} for i = 1, 8 do a[i] = i end a[3] = s(3) r.inline = a
+		local b = {} for i = 1, 8 do b[i] = i end b[9] = {s(9)} r.append = b
+		local neg = setmetatable({}, {__unm = function() return {s(1)} end})
+		r.hint = {1, 2.5, -neg, true}
+		local big = {} for i = 1, 60 do big[i] = i end r.long = {table.unpack(big)}
+		r.long[60] = s(60)
+		local c = {} for i = 1, 8 do c[i] = i end table.insert(c, 1, s(0)) r.insert = c
+		local d = {} for i = 1, 8 do d[i] = i end table.insert(d, s(10)) r.insertEnd = d
+		local e = {3, 1, 2} e[4] = 4 rawset(e, 2, s(2)) r.rawset = e
+		r.pack = table.pack(1, 2, s(5))
+		local f = {} for i = 1, 8 do f[i] = i end table.move({s(1), s(2)}, 1, 2, 4, f) r.move = f
+		local g = {} g[2] = {s(2)} g[3] = s(3) g[1] = 1 for i = 4, 20 do g[i] = i end r.resize = g
+		local h = {} for i = 1, 8 do h[i] = 1 end
+		for i = 9, 12 do h[i] = s(i) end r.grow = h
+		local srt = {} for i = 1, 8 do srt[i] = i end srt[9] = 0 r.sort = srt
+		return r`
+	for _, checked := range []bool{true, false} {
+		rt := MustNew(LibSafe, withLoop(checked))
+		res, err := runInEnv(t, rt, src)
+		if err != nil || len(res) != 1 {
+			t.Fatalf("checked=%v: %v %v", checked, res, err)
+		}
+		r := (*Table)(res[0].p)
+		host := NewTable(0, 0)
+		for i := 1; i <= 8; i++ {
+			host.Set(Int(int64(i)), Int(int64(i)))
+		}
+		host.Set(Int(3), String(strings.Repeat("h", 40)))
+		r.Set(String("host"), tableValue(host))
+		for range 3 {
+			runtime.GC()
+		}
+		checkScalarArrays(t, res[0], map[*Table]bool{})
+		if got := tabOf(r.Get(String("inline"))).Get(Int(3)).String(); got != "sss3" {
+			t.Errorf("checked=%v: inline[3] = %q", checked, got)
+		}
+		if got := tabOf(r.Get(String("long"))).Get(Int(60)).String(); got != strings.Repeat("s", 60)+"60" {
+			t.Errorf("checked=%v: long[60] = %q", checked, got)
+		}
+		if got := tabOf(r.Get(String("host"))).Get(Int(3)).String(); got != strings.Repeat("h", 40) {
+			t.Errorf("checked=%v: host[3] = %q", checked, got)
+		}
+		for _, name := range []string{"inline", "append", "hint", "long", "insert", "insertEnd", "rawset", "pack", "move", "resize", "grow"} {
+			if tab := tabOf(r.Get(String(name))); tab == nil || !tab.ptrArr {
+				t.Errorf("checked=%v: %s: the array part does not hold pointers", checked, name)
+			}
+		}
+	}
+}

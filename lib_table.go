@@ -306,9 +306,13 @@ func tabPack(c *Call) error {
 	if err := c.ex.charge(64 + n*16); err != nil {
 		return err
 	}
-	t := NewTable(n, 1)
+	ptrs := false
 	for i := range n {
-		t.arr[i] = c.Value(i)
+		ptrs = ptrs || !isScalar(c.Value(i).p)
+	}
+	t := newTable(n, 1, ptrs)
+	for i := range n {
+		t.arrSet(i, c.Value(i))
 	}
 	t.Set(String("n"), Int(int64(n)))
 	return c.ReturnValues(tableValue(t))
@@ -389,7 +393,7 @@ func (s *sorter) set(i int64, v Value) {
 		return
 	}
 	if t := s.tab; t != nil && t.meta == nil && t.flags&tabFrozen == 0 && uint64(i-1) < uint64(len(t.arr)) {
-		t.arr[i-1] = v // as SETTABLE's inline store does
+		t.arrSet(int(i-1), v) // as SETTABLE's inline store does
 		return
 	}
 	s.err = s.c.setIndex(s.t, Int(i), v)

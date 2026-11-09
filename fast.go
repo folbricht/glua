@@ -658,7 +658,9 @@ dispatch:
 				e = exSlowOp
 				break dispatch
 			}
-			if obj.n == kindTable<<56 && !isScalar(obj.p) {
+			// an array part that has held only scalars is memory the GC does not scan: the
+			// first pointer stored into it goes to the driver, which moves the array
+			if obj.n == kindTable<<56 && !isScalar(obj.p) && (isScalar(v.p) || (*Table)(obj.p).ptrArr) {
 				t := (*Table)(obj.p)
 				if idx < uint64(len(t.arr)) && t.flags&tabFrozen == 0 {
 					if d := &t.arr[idx]; d.p != nil || t.meta == nil {

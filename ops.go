@@ -163,7 +163,7 @@ func (ex *executor) slowOp() error {
 		if err := ex.charge(64 + narr*16 + nodeSize(nhash)*32); err != nil {
 			return err
 		}
-		*ex.reg(a) = tableValue(NewTable(narr, nhash))
+		*ex.reg(a) = tableValue(newTable(narr, nhash, c == 0))
 	case opSetList:
 		n := b
 		if n == 0 {
@@ -187,7 +187,11 @@ func (ex *executor) slowOp() error {
 				return err
 			}
 			t.growArray(off + n)
-			copy(t.arr[off:off+n], ex.stack[st.base+a+1:st.base+a+1+n])
+			list := ex.stack[st.base+a+1 : st.base+a+1+n]
+			if !t.ptrArr && !scalars(list) {
+				t.arrToPtrs()
+			}
+			copy(t.arr[off:off+n], list)
 		} else {
 			for j := 1; j <= n; j++ {
 				t.set(Int(int64(off+j)), ex.stack[st.base+a+j])
