@@ -478,3 +478,30 @@ func TestDynamicKeyFrozen(t *testing.T) {
 		t.Errorf("the frozen table changed: x = %d", got)
 	}
 }
+
+// GETTABLE's probe hashes a short string key inline, with its own copy of strWords and
+// hashShort: a key of every length up to 16, built at run time behind a pointer of its own,
+// must be found where Table.set put it, in both loops. A copy that hashed differently would
+// probe the wrong nodes and read nil.
+func TestShortKeysHashInline(t *testing.T) {
+	src := `
+		local base = "abcdefghijklmnopqrstuvwxyz0123456789"
+		local t = {[""] = 0}
+		for n = 1, 17 do
+			for off = 1, 8 do t[base:sub(off, off + n - 1)] = n * 100 + off end
+		end
+		local copy = string.char(base:byte(1, -1)) -- the same bytes behind another pointer
+		assert(t[string.char()] == 0, "empty key")
+		for n = 1, 17 do
+			for off = 1, 8 do
+				local k = copy:sub(off, off + n - 1)
+				assert(t[k] == n * 100 + off, "key " .. k)
+			end
+		end
+		return true`
+	for _, checked := range []bool{true, false} {
+		if res, err := runInEnv(t, MustNew(LibSafe, withLoop(checked)), src); err != nil || len(res) != 1 || !res[0].Truthy() {
+			t.Errorf("checked=%v: %v %v", checked, res, err)
+		}
+	}
+}

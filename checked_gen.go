@@ -414,7 +414,8 @@ dispatch:
 				// a float with a whole value, as arithmetic in code written for Lua 5.1 makes
 				// indexes: the integer key it normalises to
 				var whole bool
-				if idx, whole = wholeIndex(key.n); !whole {
+				f := math.Float64frombits(key.n)
+				if idx, whole = wholeIndex(f, int64(f)); !whole {
 					e = exSlowOp
 					break dispatch
 				}
@@ -422,12 +423,29 @@ dispatch:
 				// a short string key: hash it and probe inline, as hashString and keyEq would
 				t, n := (*Table)(obj.p), key.n&lenMask
 				if len(t.nodes) > 0 {
-					w1, w2 := strWords(key.p, n)
-					h, mask := hashShort(w1, w2, n), uint64(len(t.nodes)-1)
+					// strWords and hashShort, written out: each costs more than a call in a big
+					// function may, and TestShortKeysHashInline holds them to the same result
+					p := key.p
+					var w1, w2 uint64
+					switch {
+					case n >= 8:
+						w1, w2 = *(*uint64)(p), *(*uint64)(unsafe.Add(p, n-8))
+					case n >= 4:
+						w1, w2 = uint64(*(*uint32)(p)), uint64(*(*uint32)(unsafe.Add(p, n-4)))
+					case n > 0:
+						w1 = uint64(*(*byte)(p))<<16 | uint64(*(*byte)(unsafe.Add(p, n/2)))<<8 | uint64(*(*byte)(unsafe.Add(p, n-1)))
+					}
+					h, a := hashSeed^n*m1, w1<<32|w2
+					if n > 8 {
+						h, a = mix(h^w1, m2), w2
+					} else if n == 8 {
+						a = w1
+					}
+					h, mask := mix(h^a, m1^hashSeed), uint64(len(t.nodes)-1)
 					for j := uint64(0); j < 8; j++ {
 						nd := &t.nodes[(h+j)&mask]
 						if nd.k.n == key.n && !isScalar(nd.k.p) { // a string of the same length
-							if nd.k.p != key.p && !strEqBytes(&nd.k, key, uintptr(n)) {
+							if nd.k.p != key.p && !strEqBytes(nd.k.p, key.p, uintptr(n)) {
 								continue // another string of the same length
 							}
 							if nd.v.p == nil && t.meta != nil {
@@ -517,7 +535,8 @@ dispatch:
 				idx = key.n - 1
 			} else if key.p == tFloat() {
 				var whole bool
-				if idx, whole = wholeIndex(key.n); !whole {
+				f := math.Float64frombits(key.n)
+				if idx, whole = wholeIndex(f, int64(f)); !whole {
 					e = exSlowOp
 					break dispatch
 				}

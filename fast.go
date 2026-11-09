@@ -35,34 +35,37 @@ func khashAt(p *proto, i uint32) uint64 {
 // time, by capture, concatenation or sub, never shares a constant's pointer, so equal keys
 // come behind different pointers. A byte loop is the only form the inliner accepts into
 // fast; word compares cost more than its budget.
-func strEqBytes(x, y *Value, n uintptr) bool {
-	for j := uintptr(0); j < n; j++ {
-		if *(*byte)(unsafe.Add(x.p, j)) != *(*byte)(unsafe.Add(y.p, j)) {
+func strEqBytes(x, y unsafe.Pointer, n uintptr) bool {
+	for j := range n {
+		if *(*byte)(unsafe.Add(x, j)) != *(*byte)(unsafe.Add(y, j)) {
 			return false
 		}
 	}
 	return true
 }
 
-// wholeIndex returns the array index of a float key, from its bits, when its value is whole
-// and an integer: the key it normalises to, less one, as normKey gives it. The range is
-// tested on the float, as arm64 saturates int64(f) where amd64 gives the minimum. Small
-// enough to inline into fast; split in two, it spills the loop.
-func wholeIndex(bits uint64) (uint64, bool) {
-	f := math.Float64frombits(bits)
-	n := int64(f)
-	if float64(n) != f || f >= 0x1p63 || f < -0x1p63 {
+// wholeIndex returns the array index of the float key f, given n = int64(f), when f has a
+// whole value that is an integer: the key it normalises to, less one, as normKey gives it. A
+// float out of range converts to an implementation-defined integer, and every integer
+// converts back into [-2^63, 2^63], so the round trip can wrongly match only at 2^63: arm64
+// saturates to the maximum, which rounds to it. The caller converts, so that the helper fits
+// the inliner's budget for a big function. Returning the index whatever the test gives, or
+// testing in the caller, costs GETTABLE a stack reload on amd64.
+func wholeIndex(f float64, n int64) (uint64, bool) {
+	if float64(n) != f || f >= 0x1p63 {
 		return 0, false
 	}
 	return uint64(n) - 1, true
 }
 
 // isNum reports whether v is an integer or a float. Small enough to inline into fast.
-func isNum(v *Value) bool { return v.p == tInt() || v.p == tFloat() }
+func isNum(v *Value) bool {
+	return v.p == unsafe.Pointer(&tags.integer) || v.p == unsafe.Pointer(&tags.float)
+}
 
 // toFloat converts a number to a float. Small enough to inline into fast.
 func toFloat(v *Value) float64 {
-	if v.p == tInt() {
+	if v.p == unsafe.Pointer(&tags.integer) {
 		return float64(int64(v.n))
 	}
 	return math.Float64frombits(v.n)
@@ -525,7 +528,8 @@ dispatch:
 				// a float with a whole value, as arithmetic in code written for Lua 5.1 makes
 				// indexes: the integer key it normalises to
 				var whole bool
-				if idx, whole = wholeIndex(key.n); !whole {
+				f := math.Float64frombits(key.n)
+				if idx, whole = wholeIndex(f, int64(f)); !whole {
 					e = exSlowOp
 					break dispatch
 				}
@@ -533,12 +537,29 @@ dispatch:
 				// a short string key: hash it and probe inline, as hashString and keyEq would
 				t, n := (*Table)(obj.p), key.n&lenMask
 				if len(t.nodes) > 0 {
-					w1, w2 := strWords(key.p, n)
-					h, mask := hashShort(w1, w2, n), uint64(len(t.nodes)-1)
+					// strWords and hashShort, written out: each costs more than a call in a big
+					// function may, and TestShortKeysHashInline holds them to the same result
+					p := key.p
+					var w1, w2 uint64
+					switch {
+					case n >= 8:
+						w1, w2 = *(*uint64)(p), *(*uint64)(unsafe.Add(p, n-8))
+					case n >= 4:
+						w1, w2 = uint64(*(*uint32)(p)), uint64(*(*uint32)(unsafe.Add(p, n-4)))
+					case n > 0:
+						w1 = uint64(*(*byte)(p))<<16 | uint64(*(*byte)(unsafe.Add(p, n/2)))<<8 | uint64(*(*byte)(unsafe.Add(p, n-1)))
+					}
+					h, a := hashSeed^n*m1, w1<<32|w2
+					if n > 8 {
+						h, a = mix(h^w1, m2), w2
+					} else if n == 8 {
+						a = w1
+					}
+					h, mask := mix(h^a, m1^hashSeed), uint64(len(t.nodes)-1)
 					for j := uint64(0); j < 8; j++ {
 						nd := &t.nodes[(h+j)&mask]
 						if nd.k.n == key.n && !isScalar(nd.k.p) { // a string of the same length
-							if nd.k.p != key.p && !strEqBytes(&nd.k, key, uintptr(n)) {
+							if nd.k.p != key.p && !strEqBytes(nd.k.p, key.p, uintptr(n)) {
 								continue // another string of the same length
 							}
 							if nd.v.p == nil && t.meta != nil {
@@ -628,7 +649,8 @@ dispatch:
 				idx = key.n - 1
 			} else if key.p == tFloat() {
 				var whole bool
-				if idx, whole = wholeIndex(key.n); !whole {
+				f := math.Float64frombits(key.n)
+				if idx, whole = wholeIndex(f, int64(f)); !whole {
 					e = exSlowOp
 					break dispatch
 				}
