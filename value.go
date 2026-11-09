@@ -13,9 +13,9 @@ import (
 // Scalars are identified by p, objects by n:
 //
 //	nil       p == nil                n == 0
-//	boolean   p == &tags[1]           n is 0 or 1
-//	integer   p == &tags[2]           n holds the int64 bits
-//	float     p == &tags[3]           n holds the float64 bits
+//	boolean   p == &tags.boolean      n is 0 or 1
+//	integer   p == &tags.integer      n holds the int64 bits
+//	float     p == &tags.float        n holds the float64 bits
 //	string    first byte, or emptyStr n is kindString<<56 | length
 //	table     *Table                  n is kindTable<<56
 //	function  *closure or *goFunc     n is kindLuaFn<<56 or kindGoFn<<56
@@ -38,7 +38,12 @@ type Value struct {
 const _ = -(unsafe.Sizeof(Value{}) ^ 16)
 
 var (
-	tags     [4]byte // &tags[1], [2] and [3] are the sentinels for bool, int and float
+	// the sentinels for float, bool and int, kept together so that isScalar is one range
+	// check. Fields, not array elements, as &tags.integer costs the inliner less than an
+	// index, and the address of the field at offset zero costs it nothing: the float tag is
+	// there, since setFloat would otherwise exceed the budget of a big function. hashValue
+	// mixes in each tag's offset; the loop's inline hash of integer keys assumes 2.
+	tags     struct{ float, boolean, integer, unused byte }
 	emptyStr [1]byte // "" needs a pointer of its own, or it would collide with nil
 )
 
@@ -61,15 +66,15 @@ const (
 	lenMask        = 1<<56 - 1
 )
 
-func tBool() unsafe.Pointer  { return unsafe.Pointer(&tags[1]) }
-func tInt() unsafe.Pointer   { return unsafe.Pointer(&tags[2]) }
-func tFloat() unsafe.Pointer { return unsafe.Pointer(&tags[3]) }
+func tBool() unsafe.Pointer  { return unsafe.Pointer(&tags.boolean) }
+func tInt() unsafe.Pointer   { return unsafe.Pointer(&tags.integer) }
+func tFloat() unsafe.Pointer { return unsafe.Pointer(&tags.float) }
 
 func emptyString() Value { return Value{p: unsafe.Pointer(&emptyStr[0]), n: kindString << 56} }
 
 // isScalar reports whether p is nil or one of the sentinels.
 func isScalar(p unsafe.Pointer) bool {
-	return p == nil || uintptr(p)-uintptr(unsafe.Pointer(&tags[0])) < uintptr(len(tags))
+	return p == nil || uintptr(p)-uintptr(unsafe.Pointer(&tags)) < unsafe.Sizeof(tags)
 }
 
 // Bool returns a Lua boolean.
@@ -120,9 +125,14 @@ func same(a, b *Value) bool { return a.p == b.p && a.n == b.n }
 
 // setInt stores an integer result. It leaves p alone when the slot already has the tag,
 // so a register that keeps its type never takes the GC write barrier.
+//
+// The setters, isNum, toFloat and the other helpers that fast uses must each cost at most 20,
+// the inliner's budget for a call in a big function, so that fast can grow past the size
+// at which it becomes one; asmgate checks it. They name the tags directly, as calls to tInt
+// and the others cost more.
 func setInt(d *Value, n uint64) {
-	if d.p != tInt() {
-		d.p = tInt()
+	if d.p != unsafe.Pointer(&tags.integer) {
+		d.p = unsafe.Pointer(&tags.integer)
 	}
 	d.n = n
 }
@@ -138,16 +148,16 @@ func setValue(d *Value, v *Value) {
 
 // setFloat stores a float result, like setInt.
 func setFloat(d *Value, f float64) {
-	if d.p != tFloat() {
-		d.p = tFloat()
+	if d.p != unsafe.Pointer(&tags.float) {
+		d.p = unsafe.Pointer(&tags.float)
 	}
 	d.n = math.Float64bits(f)
 }
 
 // setBool stores a boolean result, like setInt. b must be 0 or 1.
 func setBool(d *Value, b uint64) {
-	if d.p != tBool() {
-		d.p = tBool()
+	if d.p != unsafe.Pointer(&tags.boolean) {
+		d.p = unsafe.Pointer(&tags.boolean)
 	}
 	d.n = b
 }
@@ -358,7 +368,7 @@ func checkValue(v Value) string {
 		if v.n != 0 {
 			return "nil pointer with a non-zero payload"
 		}
-	case v.p == unsafe.Pointer(&tags[0]):
+	case v.p == unsafe.Pointer(&tags.unused):
 		return "pointer to the unused tag"
 	case v.p == tBool():
 		if v.n > 1 {

@@ -321,7 +321,7 @@ func uintptrHex(p uintptr) string {
 func TestCheckValueRejects(t *testing.T) {
 	var x int
 	bad := []Value{
-		{p: unsafe.Pointer(&tags[0])},
+		{p: unsafe.Pointer(&tags.unused)},
 		{p: tBool(), n: 2},
 		{p: unsafe.Pointer(&emptyStr[0]), n: kindString<<56 | 1},
 		{p: unsafe.Pointer(&emptyStr[0]), n: kindTable << 56},

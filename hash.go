@@ -31,8 +31,8 @@ func mix(a, b uint64) uint64 {
 // It reads through offsets that stay inside the string: advancing p past the last block
 // would make a pointer one past the allocation, which invariant 3 forbids. A string's last
 // partial block is read as the 8 bytes that end the string, overlapping the block before it.
-// Strings of up to 16 bytes hash from strWords, so that the interpreter loop can hash them
-// inline with the same result.
+// Strings of up to 16 bytes hash from strWords and hashShort, which GETTABLE's probe in the
+// interpreter loop writes out: a change to either must be made there too.
 func hashString(p unsafe.Pointer, n int) uint64 {
 	if n <= 16 {
 		w1, w2 := strWords(p, uint64(n))
@@ -81,7 +81,7 @@ func hashWord(x uint64) uint64 {
 func hashValue(v Value) uint64 {
 	switch {
 	case v.p == tInt(), v.p == tFloat(), v.p == tBool():
-		return hashWord(v.n ^ uint64(uintptr(v.p)-uintptr(unsafe.Pointer(&tags[0])))<<62)
+		return hashWord(v.n ^ uint64(uintptr(v.p)-uintptr(unsafe.Pointer(&tags)))<<62)
 	case v.isString():
 		return hashString(v.p, int(v.n&lenMask))
 	}
