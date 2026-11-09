@@ -8,6 +8,12 @@
 //   - the dispatch head or a hot opcode touches the stack more often than the checked-in
 //     baseline allows. The design allows one store of pc in the head.
 //
+// It also fails when fast or checkedLoop would inline less once it grew past the compiler's
+// size for a big function, in which only callees costing up to 20 are inlined: a helper over
+// that budget would turn into a call, and spill the loop, the day the loop grew. It builds the
+// package once as it is and once with both loops padded past that size, through an overlay,
+// and compares the calls each inlines.
+//
 // Stack accesses on the write-barrier slow path, which runs only while the GC is marking, do
 // not count. Run with -update to accept a new baseline after an improvement.
 //
@@ -71,6 +77,14 @@ func main() {
 	tmp, err := os.MkdirTemp("", "asmgate")
 	check(err)
 	defer os.RemoveAll(tmp)
+
+	if lost := bigInlining(tmp); len(lost) > 0 {
+		fmt.Println("inlining when the loops are big:")
+		for _, l := range lost {
+			fmt.Printf("  FAIL: %s\n", l)
+		}
+		failed = true
+	}
 
 	for _, c := range configs {
 		bin := filepath.Join(tmp, c.name+".test")
@@ -392,6 +406,104 @@ func writeBaseline(path string, m map[string]int) {
 		fmt.Fprintf(&sb, "%s %d\n", k, m[k])
 	}
 	check(os.WriteFile(path, []byte(sb.String()), 0o644))
+}
+
+// loops are the functions that must inline as much when big, and the files that hold them.
+var loops = []struct{ file, fn string }{{"fast.go", "fast"}, {"checked_gen.go", "checkedLoop"}}
+
+var (
+	inlinedRe = regexp.MustCompile(`^\./(\S+\.go):(\d+):\d+: inlining call to (\S+)`)
+	bigRe     = regexp.MustCompile(`function \(\*executor\)\.(\w+) considered 'big'`)
+)
+
+// bigInlining builds the package with -m=2 as it is and with each loop padded past the size of
+// a big function, and describes the callees that the loops inline only in the first build. A
+// helper inlined into another one is lost with it. The padding goes on the line of each
+// function's opening brace, so no line number moves.
+func bigInlining(tmp string) []string {
+	overlay := map[string]string{}
+	spans := map[string][2]int{}
+	for _, l := range loops {
+		src, err := os.ReadFile(l.file)
+		check(err)
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, l.file, src, 0)
+		check(err)
+		var fd *ast.FuncDecl
+		for _, d := range f.Decls {
+			if d, ok := d.(*ast.FuncDecl); ok && d.Name.Name == l.fn {
+				fd = d
+			}
+		}
+		if fd == nil {
+			fatalf("no func %s in %s", l.fn, l.file)
+		}
+		spans[l.file] = [2]int{fset.Position(fd.Pos()).Line, fset.Position(fd.End()).Line}
+		at := fset.Position(fd.Body.Lbrace).Offset + 1
+		pad := " if ex.st.hi < -1 {" + strings.Repeat(" ex.st.hi++;", 1500) + " };"
+		padded := filepath.Join(tmp, "big-"+l.file)
+		check(os.WriteFile(padded, append(append(append([]byte{}, src[:at]...), pad...), src[at:]...), 0o644))
+		abs, err := filepath.Abs(l.file)
+		check(err)
+		overlay[abs] = padded
+	}
+	ov := filepath.Join(tmp, "overlay.json")
+	var sb strings.Builder
+	sb.WriteString(`{"Replace":{`)
+	first := true
+	for k, v := range overlay {
+		if !first {
+			sb.WriteString(",")
+		}
+		first = false
+		sb.WriteString(strconv.Quote(k) + ":" + strconv.Quote(v))
+	}
+	sb.WriteString("}}")
+	check(os.WriteFile(ov, []byte(sb.String()), 0o644))
+
+	inlined := func(args ...string) (map[string]int, map[string]bool) {
+		cmd := exec.Command("go", append([]string{"build", "-gcflags=-m=2", "-o", os.DevNull}, append(args, ".")...)...)
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			fatalf("build with -m=2: %v\n%s", err, out)
+		}
+		calls, big := map[string]int{}, map[string]bool{}
+		for _, line := range strings.Split(string(out), "\n") {
+			if m := bigRe.FindStringSubmatch(line); m != nil {
+				big[m[1]] = true
+			}
+			m := inlinedRe.FindStringSubmatch(line)
+			if m == nil {
+				continue
+			}
+			span, ok := spans[m[1]]
+			if n, _ := strconv.Atoi(m[2]); !ok || n < span[0] || n > span[1] {
+				continue
+			}
+			calls[m[1]+":"+m[2]+" "+m[3]]++
+		}
+		return calls, big
+	}
+	normal, _ := inlined()
+	padded, big := inlined("-overlay=" + ov)
+	for _, l := range loops {
+		if !big[l.fn] {
+			fatalf("the padding did not make %s big", l.fn)
+		}
+	}
+	sites := map[string]int{} // callee -> call sites it is lost at
+	for k, n := range normal {
+		if d := n - padded[k]; d > 0 {
+			sites[k[strings.IndexByte(k, ' ')+1:]] += d
+		}
+	}
+	var lost []string
+	for name, n := range sites {
+		lost = append(lost, fmt.Sprintf("%s is not inlined (call sites lost: %d): it costs over 20, or a helper that inlines it does", name, n))
+	}
+	slices.Sort(lost)
+	return lost
 }
 
 func check(err error) {
