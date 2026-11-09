@@ -3,6 +3,7 @@ package glua
 import (
 	"fmt"
 	"math"
+	"slices"
 	"unique"
 
 	"github.com/folbricht/glua/internal/syntax"
@@ -1278,6 +1279,24 @@ func (fs *fstate) finishCall(base int, args []syntax.Expr, line int, fast uint8)
 	return expdesc{k: eCall, info: pc}
 }
 
+// scalarItem reports whether a constructor's item gives a number, a boolean or nil, unless a
+// metamethod returns something else: NEWTABLE then makes the array part memory the GC does
+// not scan. It is a hint: SETLIST moves the array if a pointer comes after all, and an
+// array whose items are not all such allocates the kind that holds pointers from the start.
+func scalarItem(e syntax.Expr) bool {
+	switch e := e.(type) {
+	case *syntax.NilExpr, *syntax.TrueExpr, *syntax.FalseExpr, *syntax.IntExpr, *syntax.FloatExpr:
+		return true
+	case *syntax.ParenExpr:
+		return scalarItem(e.X)
+	case *syntax.UnaryExpr:
+		return true // -x, not x, ~x and #x
+	case *syntax.BinaryExpr:
+		return e.Op != syntax.Concat && e.Op != syntax.And && e.Op != syntax.Or
+	}
+	return false
+}
+
 func (fs *fstate) table(n *syntax.TableExpr) expdesc {
 	fs.line = n.Line
 	pc := fs.abc(opNewTable, 0, 0, 0)
@@ -1332,6 +1351,9 @@ func (fs *fstate) table(n *syntax.TableExpr) expdesc {
 	}
 	// sizes: aux holds the array size, B the hash size as log2+1
 	fs.p.code[pc+1] = uint32(narr)
+	if narr > 0 && !slices.ContainsFunc(n.Fields, func(f syntax.Field) bool { return f.Key == nil && !scalarItem(f.Value) }) {
+		fs.setC(pc, 1)
+	}
 	if nhash > 0 {
 		b := 1
 		for 1<<(b-1) < nhash {

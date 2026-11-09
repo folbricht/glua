@@ -29,6 +29,59 @@ type Table struct {
 	// metaOK caches that setmetatable accepted this table as a metatable: no __mode, and no
 	// __gc without __close. Cleared with index.
 	metaOK bool
+	// ptrArr reports that the array part may hold pointers. While it is false the array
+	// holds only nil, booleans and numbers, and is allocated as scalarSlots, which the GC
+	// neither scans nor needs barriers for: sieve's and a matrix's arrays cost it nothing.
+	// Every store into arr of a value that is not a scalar goes through arrSet or checks
+	// the flag first, and arrToPtrs moves the array to memory the GC scans.
+	ptrArr bool
+}
+
+// scalarSlot is a Value without a pointer field: p is nil or the address of a tag, which
+// is a global, never a heap object. An array part allocated as scalarSlots is read as
+// []Value, the layout being the same.
+type scalarSlot struct {
+	p uintptr
+	n uint64
+}
+
+// newArr returns an array part of length n and capacity c. Unless ptrs is set, it is made
+// of scalarSlots, and the caller must keep pointers out of it.
+func newArr(n, c int, ptrs bool) []Value {
+	if c == 0 {
+		return nil
+	}
+	if ptrs {
+		return make([]Value, n, c)
+	}
+	s := make([]scalarSlot, c)
+	return unsafe.Slice((*Value)(unsafe.Pointer(unsafe.SliceData(s))), c)[:n]
+}
+
+// arrSet stores val at index i of the array part, which has it.
+func (t *Table) arrSet(i int, val Value) {
+	if !t.ptrArr && !isScalar(val.p) {
+		t.arrToPtrs()
+	}
+	t.arr[i] = val
+}
+
+// arrToPtrs moves the array part to memory the GC scans, before the first pointer is
+// stored into it.
+func (t *Table) arrToPtrs() {
+	arr := make([]Value, len(t.arr), cap(t.arr))
+	copy(arr, t.arr)
+	t.arr, t.ptrArr = arr, true
+}
+
+// scalars reports whether every value in vs is nil, a boolean or a number.
+func scalars(vs []Value) bool {
+	for i := range vs {
+		if !isScalar(vs[i].p) {
+			return false
+		}
+	}
+	return true
 }
 
 // Table flags. The absent bits cache that a metatable lacks a metamethod. They are filled
@@ -87,12 +140,17 @@ func (mt *Table) metaGet(event string) Value {
 }
 
 // NewTable returns a table with room for narr array items and nhash other keys.
-func NewTable(narr, nhash int) *Table {
+func NewTable(narr, nhash int) *Table { return newTable(narr, nhash, true) }
+
+// newTable is NewTable. The array part is memory the GC scans if ptrs is set; otherwise it
+// is made of scalarSlots, which suits items that are numbers or booleans: a pointer stored
+// later moves it, at the cost of a second allocation.
+func newTable(narr, nhash int, ptrs bool) *Table {
 	t := &Table{}
 	if narr > 0 {
 		// like C Lua, the array part has its full size from the start, nils included, so
 		// that {1, nil, 3} has length 3
-		t.arr = make([]Value, narr)
+		t.arr, t.ptrArr = newArr(narr, narr, ptrs), ptrs
 	}
 	if nhash > 0 {
 		t.nodes = make([]node, nodeSize(nhash))
@@ -188,7 +246,7 @@ func (t *Table) set(key, val Value) {
 	if key.p == tInt() {
 		i := int64(key.n) - 1
 		if uint64(i) < uint64(len(t.arr)) {
-			t.arr[i] = val
+			t.arrSet(int(i), val)
 			return
 		}
 		if i == int64(len(t.arr)) && !val.IsNil() {
@@ -283,11 +341,23 @@ func (t *Table) resize(k Value) bool {
 		return false
 	}
 	old, oldArr := t.nodes, t.arr
+	// the new array part holds pointers only if what goes into it does: a table that held
+	// one and no longer does gets an array the GC does not scan
+	ptrs := !scalars(oldArr[:min(na, len(oldArr))])
+	for i := range old {
+		if nd := &old[i]; !ptrs && nd.k.p == tInt() && int64(nd.k.n) >= 1 && int64(nd.k.n) <= int64(na) {
+			ptrs = !isScalar(nd.v.p)
+		}
+	}
 	if na > len(t.arr) {
-		t.arr = append(t.arr, make([]Value, na-len(t.arr))...)
+		arr := newArr(na, na, ptrs)
+		copy(arr, t.arr)
+		t.arr, t.ptrArr = arr, ptrs
 		oldArr = nil
 	} else {
-		t.arr = append(make([]Value, 0, na), oldArr[:na]...) // a new array, so the old one is freed
+		arr := newArr(na, na, ptrs) // a new array, so the old one is freed
+		copy(arr, oldArr[:na])
+		t.arr, t.ptrArr = arr, ptrs
 		oldArr = oldArr[na:]
 		for i := range oldArr {
 			if !oldArr[i].IsNil() {
@@ -363,21 +433,26 @@ func computeSizes(nums *[64]int, nint int) int {
 // appendArr adds val at the end of the array part, then moves any following integer
 // keys over from the hash part.
 func (t *Table) appendArr(val Value) {
-	if len(t.arr) == cap(t.arr) {
-		// double, as C Lua's rehash does: append grows large slices by only a quarter, which
-		// copies a growing array many more times
-		arr := make([]Value, len(t.arr), max(4, 2*cap(t.arr)))
-		copy(arr, t.arr)
-		t.arr = arr
-	}
-	t.arr = append(t.arr, val)
-	for len(t.nodes) > 0 {
+	for {
+		if len(t.arr) == cap(t.arr) {
+			// double, as C Lua's rehash does: append grows large slices by only a quarter,
+			// which copies a growing array many more times
+			ptrs := t.ptrArr || !isScalar(val.p)
+			arr := newArr(len(t.arr), max(4, 2*cap(t.arr)), ptrs)
+			copy(arr, t.arr)
+			t.arr, t.ptrArr = arr, ptrs
+		}
+		t.arr = t.arr[:len(t.arr)+1]
+		t.arrSet(len(t.arr)-1, val)
+		if len(t.nodes) == 0 {
+			return
+		}
 		next := Int(int64(len(t.arr)) + 1)
 		idx := t.findNode(&next, hashValue(next))
 		if idx < 0 || t.nodes[idx].v.IsNil() {
 			return
 		}
-		t.arr = append(t.arr, t.nodes[idx].v)
+		val = t.nodes[idx].v
 		t.nodes[idx].v = Value{} // leaves a deleted key behind; the next rehash drops it
 	}
 }
@@ -389,14 +464,21 @@ func (t *Table) growArray(n int) {
 		return
 	}
 	old := len(t.arr)
-	t.arr = append(t.arr, make([]Value, n-old)...)
+	if n <= cap(t.arr) {
+		t.arr = t.arr[:n]
+		clear(t.arr[old:])
+	} else {
+		arr := newArr(n, n, t.ptrArr)
+		copy(arr, t.arr)
+		t.arr = arr
+	}
 	if len(t.nodes) == 0 {
 		return
 	}
 	for i := old; i < n; i++ {
 		k := Int(int64(i) + 1)
 		if idx := t.findNode(&k, hashValue(k)); idx >= 0 {
-			t.arr[i] = t.nodes[idx].v
+			t.arrSet(i, t.nodes[idx].v)
 			t.nodes[idx].v = Value{} // a deleted key; the next rehash drops it
 		}
 	}

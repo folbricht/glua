@@ -192,13 +192,21 @@ func encodeReflect(rv reflect.Value, depth int) (Value, error) {
 		if t.Kind() == reflect.Slice && rv.IsNil() {
 			return Value{}, nil
 		}
-		tab := NewTable(rv.Len(), 0)
+		var ptrs bool // numbers and booleans become scalars, as a rule: arrSet handles the rest
+		switch t.Elem().Kind() {
+		case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+			reflect.Float32, reflect.Float64:
+		default:
+			ptrs = true
+		}
+		tab := newTable(rv.Len(), 0, ptrs)
 		for i := range rv.Len() {
 			x, err := encodeReflect(rv.Index(i), depth+1)
 			if err != nil {
 				return Value{}, err
 			}
-			tab.arr[i] = x
+			tab.arrSet(i, x)
 		}
 		return tableValue(tab), nil
 	case reflect.Map:

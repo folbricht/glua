@@ -46,7 +46,7 @@ const (
 	opSetIndexK // R[A][B] = K[C], integer key 0..255
 	opSetFieldK // R[A][K[B]] = K[C]; aux: hint site
 	opSelf      // R[A+1] = R[B]; R[A] = R[B][K[C]]; aux: hint site
-	opNewTable  // R[A] = {}; B: hash size, C unused; aux: array size
+	opNewTable  // R[A] = {}; B: hash size, C: 1 when the array items look like scalars; aux: array size
 	opSetList   // R[A][aux+i] = R[A+i] for 1 <= i <= B; B=0: up to top
 
 	// arithmetic and bitwise operators: R[A] = R[B] op R[C]
@@ -185,7 +185,7 @@ var opTable = [numOps]opInfo{
 	opSetIndexK:  {"SETINDEXK", oReg, oInt, oK, false, oNone},
 	opSetFieldK:  {"SETFIELDK", oReg, oKStr, oK, false, oSite},
 	opSelf:       {"SELF", oReg, oReg, oKStr, false, oSite},
-	opNewTable:   {"NEWTABLE", oReg, oInt, oNone, false, oSize},
+	opNewTable:   {"NEWTABLE", oReg, oInt, oInt, false, oSize},
 	opSetList:    {"SETLIST", oReg, oInt, oNone, false, oSize},
 	opAdd:        {"ADD", oReg, oReg, oReg, false, oNone},
 	opSub:        {"SUB", oReg, oReg, oReg, false, oNone},
